@@ -23,16 +23,19 @@ In fullscreen at 140 columns or wider, the right sidebar scrolls **✿ Gentle-Pi
 
 The rail reuses its last frame until something it paints changes, so silent frames stay cheap and live session state still lands on the next frame: a model switch, a new thinking level, context growth, session cost, session name and extension statuses all refresh the Status card without a redraw of the rest of the sidebar.
 
-The status bar replaces pi's three-line footer with a single line of segments:
+The status bar replaces pi's three-line footer with a responsive one-to-three-line layout:
 
 ```text
-✿ gentle-pi ⟡ ~/work/gentle-pi main ⟡ gpt-5.5 · medium ⟡ ctx ▰▰▰▰▱▱▱▱ 45% ⟡ $9.49 sub ⟡ MCP: 3 servers enabled        Release notes
+✿ gentle-pi ⟡ gentle-pi main                                               Release notes
+gpt-5.5 · medium ⟡ ctx ▰▰▱▱▱ 45% ⟡ $9.49 sub ⟡ codex 5h ▰▰▰▱▱ 62%
+🔌 MCP: 3 servers enabled
 ```
 
+- The project and session share the first line; model, context, cost, and provider usage share the runtime line; integration statuses use a third line when needed.
 - Context is a gauge, not a number. It turns amber at 80% and red at 95%; after compaction it shows `?%` until the next response.
 - Cost carries `sub` when the active model runs on a subscription login.
-- Statuses other extensions publish through `setStatus` are appended as trailing segments; the session name sits at the right edge.
-- On narrow terminals the session name is dropped first, then trailing segments, before the line is truncated.
+- On compact terminals, gauges degrade from 5 cells to 2 to percentage-only; rightmost provider usage compacts before context.
+- Overflow is summarized as `+N more` or `+N integrations`; the session stays on the project line, clipping there before omission.
 
 The prompt wraps pi's editor in a rounded frame with a petal that shows what the agent is doing:
 
@@ -70,10 +73,11 @@ Changes across this session's registered worktrees show up below the editor and 
 - On a file row, `o` (or `enter`) opens the selected file in `$VISUAL` or `$EDITOR`, with the selected worktree as the editor's working directory, and returns to pi when the editor exits. Diff lookup and caches are also scoped to that root; identical relative filenames in other worktrees cannot share a diff.
 - Untracked files are diffed against an empty file so new files show their full content.
 
-Subscription usage shows in the bar after the cost, and `/gentle:usage` opens a panel with every window per provider:
+Subscription usage appears after the cost on the runtime line when space allows, and `/gentle:usage` opens a panel with every window per provider:
 
 ```text
-✿ gentle-pi ⟡ … ⟡ $9.49 sub ⟡ codex 5h ▰▰▰▰▰▱▱▱ 62% · week 31%
+✿ gentle-pi ⟡ …
+… ⟡ $9.49 sub ⟡ codex 5h ▰▰▰▱▱ 62% · week 31%
 ```
 
 - For Codex, usage comes from the same account usage endpoint the Codex CLI reads, using the OAuth token pi already holds. It is fetched at session start, at most every 5 minutes after a turn, and on `r` in the panel. Rate-limit headers on SSE responses are picked up too.
