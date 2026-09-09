@@ -12,8 +12,8 @@ import {
 	type ShellBarTheme,
 } from "../lib/shell-bar.ts";
 
-// The Gentle Shell bar replaces pi's three-line footer with one line of
-// segments. Rendering is pure so it can be verified without a TUI.
+// The Gentle Shell bar replaces pi's three-line footer with a responsive
+// one-to-three-line layout. Rendering is pure so it can be verified without a TUI.
 
 const taggedTheme: ShellBarTheme = {
 	fg(color: string, value: string) {
@@ -80,8 +80,57 @@ test("renderShellBar renders one line with the segments in order", () => {
 	assert.equal(rest.length, 0);
 	assert.equal(
 		line,
-		"✿ gentle-pi ⟡ ~/work/gentle-pi main ⟡ gpt-5.5 · medium ⟡ ctx ▰▰▰▰▱▱▱▱ 45% ⟡ $9.49 sub",
+		"✿ gentle-pi ⟡ gentle-pi main ⟡ gpt-5.5 · medium ⟡ ctx ▰▰▱▱▱ 45% ⟡ $9.49 sub",
 	);
+});
+
+test("renderShellBar uses five-cell gauges in its full presentation", () => {
+	const usage = {
+		provider: "openai-codex",
+		plan: "pro",
+		fetchedAt: 0,
+		limits: [{ name: "codex", limitReached: false, windows: [{ label: "5h", usedPercent: 62, windowSeconds: 18_000, resetAt: null }] }],
+	};
+	const [line] = renderShellBar(model({ usage }), plainTheme, 200);
+	assert.match(line, /ctx ▰▰▱▱▱ 45%/);
+	assert.match(line, /codex 5h ▰▰▰▱▱ 62%$/);
+});
+
+test("renderShellBar degrades usage before context from five cells to two cells to percentage-only", () => {
+	const usage = {
+		provider: "openai-codex",
+		plan: "pro",
+		fetchedAt: 0,
+		limits: [{ name: "codex", limitReached: false, windows: [{ label: "5h", usedPercent: 62, windowSeconds: 18_000, resetAt: null }] }],
+	};
+	const runtime = (width: number) => renderShellBar(model({ usage, statuses: ["MCP ready"] }), plainTheme, width)[1];
+	assert.match(runtime(62), /ctx ▰▰▱▱▱ 45% ⟡ \$9\.49 sub ⟡ codex 5h ▰▱ 62%$/);
+	assert.match(runtime(59), /ctx ▰▰▱▱▱ 45% ⟡ \$9\.49 sub ⟡ codex 5h 62%$/);
+	assert.match(runtime(56), /ctx ▰▱ 45% ⟡ \$9\.49 sub ⟡ codex 5h 62%$/);
+});
+
+test("renderShellBar reflows complete content into semantic lines before omitting it", () => {
+	const usage = {
+		provider: "openai-codex",
+		plan: "pro",
+		fetchedAt: 0,
+		limits: [{ name: "codex", limitReached: false, windows: [{ label: "5h", usedPercent: 62, windowSeconds: 18_000, resetAt: null }] }],
+	};
+	const intermediate = renderShellBar(model({ sessionName: "Release notes" }), plainTheme, 80);
+	assert.equal(intermediate.length, 2);
+	assert.match(intermediate[0], /Release notes$/);
+	assert.match(intermediate[1], /gpt-5\.5/);
+
+	const withUsage = renderShellBar(model({ usage }), plainTheme, 80);
+	assert.equal(withUsage.length, 2);
+	assert.match(withUsage[1], /codex 5h/);
+
+	const narrow = renderShellBar(model({ usage, statuses: ["MCP: 3/3", "Engram ready"] }), plainTheme, 55);
+	assert.equal(narrow.length, 3);
+	assert.doesNotMatch(narrow[2], /codex 5h/);
+	assert.match(narrow[2], /MCP: 3\/3|Engram ready|\+\d+ integrations/);
+	for (const line of [...intermediate, ...withUsage]) assert.ok(visibleWidth(line) <= 80);
+	for (const line of narrow) assert.ok(visibleWidth(line) <= 55);
 });
 
 test("renderShellBar colors the brand, model, effort, and gauge by role", () => {
@@ -89,13 +138,13 @@ test("renderShellBar colors the brand, model, effort, and gauge by role", () => 
 	assert.match(line, /<accent>✿ gentle-pi<\/accent>/);
 	assert.match(line, /<text>gpt-5\.5<\/text>/);
 	assert.match(line, /<syntaxFunction>medium<\/syntaxFunction>/);
-	assert.match(line, /<accent>▰▰▰▰<\/accent><border>▱▱▱▱<\/border>/);
+	assert.match(line, /<accent>▰▰<\/accent><border>▱▱▱<\/border>/);
 	assert.match(line, /<dim>⟡<\/dim>/);
 });
 
 test("renderShellBar shows the branch as dirty-neutral and omits it outside git", () => {
 	const [line] = renderShellBar(model({ branch: null }), plainTheme, 160);
-	assert.match(line, /⟡ ~\/work\/gentle-pi ⟡/);
+	assert.match(line, /⟡ gentle-pi ⟡/);
 });
 
 test("renderShellBar shows the session dirty count next to the branch", () => {
@@ -116,12 +165,12 @@ test("renderShellBar adds the subscription windows after the cost when usage is 
 		] }],
 	};
 	const [line] = renderShellBar(model({ usage }), plainTheme, 200);
-	assert.match(line, /\$9\.49 sub ⟡ codex 5h ▰▰▰▰▰▱▱▱ 62% · week 31%$/);
+	assert.match(line, /\$9\.49 sub ⟡ codex 5h ▰▰▰▱▱ 62% · week 31%$/);
 });
 
 test("renderShellBar shows an unknown context as a question mark after compaction", () => {
 	const [line] = renderShellBar(model({ contextPercent: null }), plainTheme, 160);
-	assert.match(line, /ctx ▱▱▱▱▱▱▱▱ \?%/);
+	assert.match(line, /ctx ▱▱▱▱▱ \?%/);
 });
 
 test("renderShellBar right-aligns the session name when it fits", () => {
@@ -142,26 +191,79 @@ test("renderShellBar repaints extension statuses in the bar role, discarding col
 	assert.doesNotMatch(line, /\x1b\[/);
 });
 
-test("renderShellBar compacts the path and branch before it sacrifices an extension status", () => {
+test("renderShellBar preserves the project identity before it sacrifices an extension status", () => {
 	const long = model({ branch: "fix/shell-bar-status-ansi", dirty: 2, statuses: ["MCP: 3/3 servers"] });
 	const [full] = renderShellBar(long, plainTheme, 160);
-	assert.match(full, /~\/work\/gentle-pi fix\/shell-bar-status-ansi ±2 .* MCP: 3\/3 servers$/);
-	const [compact] = renderShellBar(long, plainTheme, 118);
-	assert.ok(visibleWidth(compact) <= 118, `line overflowed: ${visibleWidth(compact)}`);
-	assert.match(compact, /⟡ gentle-pi fix\/shell-bar-… ±2 ⟡/);
-	assert.match(compact, /MCP: 3\/3 servers$/);
+	assert.match(full, /gentle-pi fix\/shell-bar-status-ansi ±2 .* MCP: 3\/3 servers$/);
+	const compact = renderShellBar(long, plainTheme, 90);
+	for (const line of compact) assert.ok(visibleWidth(line) <= 90, `line overflowed: ${visibleWidth(line)}`);
+	assert.match(compact[0], /✿ gentle-pi ⟡ gentle-pi fix\/shell-bar-status-ansi ±2$/);
+	assert.match(compact.join("\n"), /MCP: 3\/3 servers/);
 });
 
-test("renderShellBar drops the session name, then trailing segments, before truncating", () => {
-	const wide = model({ sessionName: "Release notes", statuses: ["MCP: 3 servers enabled"] });
-	const [atNinety] = renderShellBar(wide, plainTheme, 90);
-	assert.ok(visibleWidth(atNinety) <= 90, `line overflowed: ${visibleWidth(atNinety)}`);
-	assert.doesNotMatch(atNinety, /Release notes/);
-	assert.match(atNinety, /gpt-5\.5/);
+test("renderShellBar keeps provider usage on line two and statuses on line three", () => {
+	const usage = {
+		provider: "openai-codex",
+		plan: "pro",
+		fetchedAt: 0,
+		limits: [{ name: "codex", limitReached: false, windows: [{ label: "week", usedPercent: 4, windowSeconds: 604_800, resetAt: null }] }],
+	};
+	const lines = renderShellBar(model({ usage, statuses: ["MCP: 3 servers enabled", "Engram ready"] }), plainTheme, 80);
+	assert.equal(lines.length, 3);
+	assert.match(lines[1], /\$9\.49 sub ⟡ codex week/);
+	assert.match(lines[2], /MCP: 3 servers enabled|Engram ready|\+\d+ (more|integrations)/);
+	assert.doesNotMatch(lines[2], /codex week/);
+});
 
-	const [atFifty] = renderShellBar(wide, plainTheme, 50);
-	assert.ok(visibleWidth(atFifty) <= 50, `line overflowed: ${visibleWidth(atFifty)}`);
-	assert.match(atFifty, /^✿ gentle-pi/);
+test("renderShellBar compacts runtime details before omitting provider usage", () => {
+	const usage = {
+		provider: "openai-codex",
+		plan: "pro",
+		fetchedAt: 0,
+		limits: [{ name: "codex", limitReached: false, windows: [{ label: "week", usedPercent: 4, windowSeconds: 604_800, resetAt: null }] }],
+	};
+	const lines = renderShellBar(model({ usage, statuses: ["MCP: 3 servers enabled"] }), plainTheme, 55);
+	assert.equal(lines.length, 3);
+	assert.match(lines[1], /codex week/);
+	assert.match(lines[2], /MCP: 3 servers enabled/);
+});
+
+test("renderShellBar keeps the session on the project line and reports narrow status omissions", () => {
+	const wide = model({ sessionName: "Release notes", statuses: ["MCP: 3 servers enabled", "Engram ready"] });
+	const atNinety = renderShellBar(wide, plainTheme, 90);
+	assert.equal(atNinety.length, 3);
+	assert.match(atNinety[0], /Release notes$/);
+	assert.match(atNinety[1], /gpt-5\.5/);
+	assert.match(atNinety[2], /MCP: 3 servers enabled|\+1 integrations/);
+
+	const atFifty = renderShellBar(wide, plainTheme, 50);
+	assert.equal(atFifty.length, 3);
+	for (const line of atFifty) assert.ok(visibleWidth(line) <= 50, `line overflowed: ${visibleWidth(line)}`);
+	assert.match(atFifty[0], /^✿ gentle-pi/);
+});
+
+test("renderShellBar keeps ANSI, Unicode, and long sanitized statuses within three lines", () => {
+	const ansiTheme: ShellBarTheme = {
+		fg: (_color, text) => `\x1b[31m${text}\x1b[0m`,
+		bold: (text) => text,
+	};
+	const lines = renderShellBar(model({
+		cwd: "/workspace/設計/very-long-project-name",
+		branch: "feature/非常に長いブランチ名",
+		modelId: "gpt\n5.5",
+		sessionName: "🚀 release notes",
+		statuses: ["\x1b[32mMCP:\t3/3\x1b[0m", "Engram\nready", "A status that is deliberately very long"],
+	}), ansiTheme, 42);
+	assert.equal(lines.length, 3);
+	for (const line of lines) {
+		assert.ok(visibleWidth(line) <= 42, `line overflowed: ${visibleWidth(line)}`);
+		assert.doesNotMatch(line, /\t|\n/);
+	}
+	// The compact project identity fills this width, so the session is omitted;
+	// where there is remaining space, projectLine clips it before omission.
+	assert.doesNotMatch(lines[0], /release|🚀/);
+	assert.match(lines[1], /gpt 5\.5/);
+	assert.match(lines[2], /\+\d+ (more|integrations)|MCP: 3\/3/);
 });
 
 test("shellEnabled stays off inside a Gentle Agents child", () => {
