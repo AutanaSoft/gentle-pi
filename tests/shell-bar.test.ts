@@ -242,6 +242,66 @@ test("renderShellBar keeps the session on the project line and reports narrow st
 	assert.match(atFifty[0], /^✿ gentle-pi/);
 });
 
+test("renderShellBar characterizes the installed terminal-width oracle for representative graphemes", () => {
+	const expectedWidths = new Map([
+		["🧠", 2],
+		["🔌", 2],
+		["🐴", 2],
+		["👩🏽‍💻", 2],
+		["👨‍👩‍👧‍👦", 2],
+		["❤️", 2],
+		["©️", 2],
+		["🇺🇸", 2],
+		["界", 2],
+		["é", 1],
+	]);
+	for (const [text, width] of expectedWidths) assert.equal(visibleWidth(text), width, `${text} should be ${width} cells`);
+});
+
+test("renderShellBar characterizes literal emoji and CJK status boundaries", () => {
+	const candidates = [
+		{ text: "🧠X", width: 3, limits: [2, 3, 4] },
+		{ text: "👩🏽‍💻X", width: 3, limits: [2, 3, 4] },
+		{ text: "設計X", width: 5, limits: [4, 5, 6] },
+	];
+	for (const { text, width, limits } of candidates) {
+		assert.equal(visibleWidth(text), width);
+		for (const limit of limits) {
+			const lines = renderShellBar(model({ statuses: [text] }), plainTheme, limit);
+			assert.ok(lines.every((line) => visibleWidth(line) <= limit), `${text} overflowed ${limit}`);
+			assert.equal(Boolean(lines[2]?.includes(text)), limit >= width, `${text} fit decision at ${limit}`);
+		}
+	}
+});
+
+test("renderShellBar keeps emoji-heavy statuses or their omission count at baseline widths", () => {
+	const statuses = ["🧠 runtime ready", "🔌 MCP connected", "🐴 FFF indexed"];
+	const ansiTheme: ShellBarTheme = {
+		fg: (_color, text) => `\x1b[38;5;141m${text}\x1b[0m`,
+		bold: (text) => text,
+	};
+	for (const [themeName, theme] of [["plain", plainTheme], ["ANSI", ansiTheme]] as const) {
+		for (const width of [220, 160, 120, 100, 80]) {
+			const lines = renderShellBar(model({ statuses }), theme, width);
+			assert.ok(lines.every((line) => visibleWidth(line) <= width), `${themeName} overflowed ${width}`);
+			const visible = statuses.filter((status) => lines.some((line) => line.includes(status))).length;
+			const indicator = lines.join("\n").match(/\+(\d+) (more|integrations)/);
+			const omitted = indicator ? Number(indicator[1]) : 0;
+			assert.equal(visible + omitted, statuses.length, `${themeName} status accounting at ${width}`);
+		}
+	}
+});
+
+test("renderShellBar counts only sanitized statuses when reporting omissions", () => {
+	const lines = renderShellBar(model({
+		branch: "feature/設計-👩🏽‍💻-👨‍👩‍👧‍👦-❤️-©️-🇺🇸-é",
+		statuses: ["\x1b[32m🧠 ready\x1b[0m", "\n\t", "🔌 connected", "🐴 indexed"],
+	}), plainTheme, 16);
+	assert.ok(lines.every((line) => visibleWidth(line) <= 16));
+	assert.match(lines[2], /\+3 integrations/);
+	assert.doesNotMatch(lines[2], /\+4 integrations/);
+});
+
 test("renderShellBar keeps ANSI, Unicode, and long sanitized statuses within three lines", () => {
 	const ansiTheme: ShellBarTheme = {
 		fg: (_color, text) => `\x1b[31m${text}\x1b[0m`,
@@ -264,6 +324,92 @@ test("renderShellBar keeps ANSI, Unicode, and long sanitized statuses within thr
 	assert.doesNotMatch(lines[0], /release|🚀/);
 	assert.match(lines[1], /gpt 5\.5/);
 	assert.match(lines[2], /\+\d+ (more|integrations)|MCP: 3\/3/);
+});
+
+const providerUsage = {
+	provider: "openai-codex",
+	plan: "pro",
+	fetchedAt: 0,
+	limits: [{ name: "codex", limitReached: false, windows: [{ label: "week", usedPercent: 4, windowSeconds: 604_800, resetAt: null }] }],
+};
+
+function assertBoundedNonEmptyLines(lines: string[], width: number): void {
+	assert.ok(lines.length >= 1 && lines.length <= 3);
+	for (const line of lines) {
+		assert.notEqual(line, "");
+		assert.ok(visibleWidth(line) <= width, `line overflowed ${width}: ${line}`);
+	}
+}
+
+test("renderShellBar declares omitted runtime without inflating integration counts at 42 columns", () => {
+	const statuses = ["🧠 tmp ready", "🔌 MCP connected", "🐴 FFF indexed", "Engram ready", "Review clean"];
+	const lines = renderShellBar(model({ usage: providerUsage, statuses }), plainTheme, 42);
+	assertBoundedNonEmptyLines(lines, 42);
+	const output = lines.join("\n");
+	assert.match(output, /codex week|r!/);
+	assert.match(output, /\$9\.49 sub|r!/);
+	const visible = statuses.filter((status) => output.includes(status)).length;
+	const indicator = output.match(/\+(\d+) (more|integrations)/);
+	assert.equal(visible + Number(indicator?.[1] ?? 0), statuses.length);
+});
+
+test("renderShellBar declares omitted cost at narrower widths", () => {
+	const lines = renderShellBar(model({ usage: providerUsage, statuses: ["MCP ready"] }), plainTheme, 20);
+	assertBoundedNonEmptyLines(lines, 20);
+	assert.match(lines.join("\n"), /\$9\.49 sub|r!/);
+});
+
+test("renderShellBar does not return an empty third row when usage cannot fit without statuses", () => {
+	const lines = renderShellBar(model({ usage: providerUsage }), plainTheme, 30);
+	assertBoundedNonEmptyLines(lines, 30);
+	assert.match(lines.join("\n"), /codex week|r!/);
+});
+
+test("renderShellBar treats sanitized-empty statuses as absent", () => {
+	const lines = renderShellBar(model({ usage: providerUsage, statuses: ["\n\t", "\x1b[31m\x1b[0m"] }), plainTheme, 30);
+	assertBoundedNonEmptyLines(lines, 30);
+	assert.match(lines.join("\n"), /codex week|r!/);
+});
+
+test("renderShellBar maps width-five omission markers to their semantic classes", () => {
+	const cases = [
+		["statuses only", model({ statuses: ["MCP ready"] }), ["i!"]],
+		["usage only", model({ usage: providerUsage }), ["r!"]],
+		["usage and statuses", model({ usage: providerUsage, statuses: ["MCP ready"] }), ["r! i!"]],
+		["neither", model(), ["!"]],
+	] as const;
+	for (const [name, input, expected] of cases) {
+		assert.deepEqual(renderShellBar(input, plainTheme, 5), expected, name);
+	}
+	const constrained = model({ usage: providerUsage, statuses: ["MCP ready"] });
+	assert.match(renderShellBar(constrained, plainTheme, 6).join("\n"), /r! i!/);
+	for (const width of [1, 2, 3, 4]) assertBoundedNonEmptyLines(renderShellBar(constrained, plainTheme, width), width);
+	for (const line of renderShellBar(constrained, plainTheme, 0)) assert.ok(visibleWidth(line) <= 0);
+});
+
+test("renderShellBar does not emit i! below five columns without effective integrations", () => {
+	const noIntegrations = model({ usage: providerUsage, statuses: ["\n\t", "\x1b[31m\x1b[0m"] });
+	for (const width of [1, 2, 3, 4]) {
+		const lines = renderShellBar(noIntegrations, plainTheme, width);
+		assertBoundedNonEmptyLines(lines, width);
+		assert.doesNotMatch(lines.join("\n"), /i!/);
+	}
+});
+
+test("renderShellBar triangulates runtime and integration omissions across costs and decreasing widths", () => {
+	for (const subscription of [true, false]) {
+		for (const usage of [undefined, providerUsage]) {
+			for (const statuses of [[], ["MCP ready"], ["\n\t", "MCP ready", "Engram ready"]]) {
+				for (const width of [80, 42, 20, 6, 5, 4, 3, 2, 1]) {
+					const lines = renderShellBar(model({ subscription, usage, statuses }), plainTheme, width);
+					assertBoundedNonEmptyLines(lines, width);
+					if (width >= 5 && usage && statuses.filter((status) => status.trim()).length) {
+						assert.match(lines.join("\n"), /codex week|r!/);
+					}
+				}
+			}
+		}
+	}
 });
 
 test("shellEnabled stays off inside a Gentle Agents child", () => {
