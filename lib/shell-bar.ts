@@ -91,14 +91,7 @@ interface ShellBarFields {
 }
 
 function clipText(text: string, max: number): string {
-	if (visibleWidth(text) <= max) return text;
-	if (max <= 1) return "…";
-	let clipped = "";
-	for (const char of text) {
-		if (visibleWidth(clipped + char) > max - 1) break;
-		clipped += char;
-	}
-	return `${clipped}…`;
+	return truncateToWidth(text, max, "…");
 }
 
 function joinSegments(segments: string[], theme: ShellBarTheme): string {

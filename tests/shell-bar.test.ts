@@ -412,6 +412,29 @@ test("renderShellBar triangulates runtime and integration omissions across costs
 	}
 });
 
+test("renderShellBar clips compact branches on grapheme boundaries", () => {
+	const branch = "\x1b[35m123456789012👩🏽‍❤️‍💋‍👩é界\x1b[0m";
+	const ansiTheme: ShellBarTheme = {
+		fg: (_color, text) => `\x1b[38;5;141m${text}\x1b[0m`,
+		bold: (text) => text,
+	};
+	for (const [themeName, theme] of [["plain", plainTheme], ["ANSI", ansiTheme]] as const) {
+		const lines = renderShellBar(model({ branch }), theme, 39);
+		const first = lines[0].replace(/\x1b\[[0-9;]*m/g, "");
+		assert.equal(first, "✿ gentle-pi ⟡ gentle-pi 123456789012…", `${themeName} compact branch`);
+		assert.ok(visibleWidth(lines[0]) <= 39, `${themeName} compact branch overflowed`);
+		assert.doesNotMatch(first, /\u200d|\u{fe0f}|[\u{1f3fb}-\u{1f3ff}]|\p{M}/u, `${themeName} left incomplete grapheme control`);
+		assert.doesNotMatch(lines.join(""), /\x1b\[35m/, `${themeName} preserved source branch ANSI`);
+	}
+
+	assert.deepEqual(renderShellBar(model({ branch }), plainTheme, 0), []);
+	for (const width of [1, 2]) {
+		const lines = renderShellBar(model({ branch }), plainTheme, width);
+		assert.ok(lines.every((line) => visibleWidth(line) <= width), `boundary width ${width} overflowed`);
+		assert.doesNotMatch(lines.join(""), /\u200d|\u{fe0f}|[\u{1f3fb}-\u{1f3ff}]|\p{M}/u, `boundary width ${width} retained grapheme control`);
+	}
+});
+
 test("shellEnabled stays off inside a Gentle Agents child", () => {
 	assert.equal(shellEnabled({ GENTLE_PI_AGENTS_CHILD: "1" }), false);
 });
