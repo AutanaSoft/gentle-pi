@@ -156,7 +156,18 @@ function projectLine(fields: ShellBarFields, theme: ShellBarTheme, width: number
 	return `${identity}${" ".repeat(Math.max(RIGHT_PADDING, width - visibleWidth(identity) - visibleWidth(session)))}${session}`;
 }
 
-function runtimeLine(fields: ShellBarFields, theme: ShellBarTheme, width: number, includeUsage: boolean): { line: string; includesUsage: boolean } {
+interface RuntimeLine {
+	line: string;
+	includesUsage: boolean;
+	includesCost: boolean;
+}
+
+interface SemanticEntry {
+	text: string;
+	omissionClass: "runtime" | "integration";
+}
+
+function runtimeLine(fields: ShellBarFields, theme: ShellBarTheme, width: number, includeUsage: boolean): RuntimeLine {
 	const candidates = includeUsage && fields.usage
 		? [
 			{ context: fields.context[0], usage: fields.usage[0] },
@@ -169,20 +180,28 @@ function runtimeLine(fields: ShellBarFields, theme: ShellBarTheme, width: number
 	for (const model of [fields.model, fields.compactModel]) {
 		for (const candidate of candidates) {
 			const line = joinSegments([model, candidate.context, fields.cost, candidate.usage ?? ""], theme);
-			if (visibleWidth(line) <= width) return { line, includesUsage: Boolean(candidate.usage) };
+			if (visibleWidth(line) <= width) return { line, includesUsage: Boolean(candidate.usage), includesCost: true };
 		}
 	}
-	return { line: fitLine(joinSegments([fields.compactModel, fields.context[2]], theme), width), includesUsage: false };
+	return { line: fitLine(joinSegments([fields.compactModel, fields.context[2]], theme), width), includesUsage: false, includesCost: false };
 }
 
-function statusLine(fields: ShellBarFields, theme: ShellBarTheme, width: number): string {
-	for (let count = fields.statuses.length; count >= 0; count--) {
-		const omitted = fields.statuses.length - count;
-		const indicator = omitted ? theme.fg(ROLE.STATUS, count ? `+${omitted} more` : `+${omitted} integrations`) : "";
-		const line = joinSegments([...fields.statuses.slice(0, count), indicator], theme);
-		if (visibleWidth(line) <= width) return line;
+function semanticLine(entries: SemanticEntry[], theme: ShellBarTheme, width: number): string {
+	for (let count = entries.length; count >= 0; count--) {
+		const admitted = entries.slice(0, count);
+		const omitted = entries.slice(count);
+		const runtimeOmitted = omitted.some((entry) => entry.omissionClass === "runtime");
+		const integrationsOmitted = omitted.filter((entry) => entry.omissionClass === "integration").length;
+		const indicators = [
+			runtimeOmitted ? theme.fg(ROLE.STATUS, "r!") : "",
+			integrationsOmitted ? theme.fg(ROLE.STATUS, admitted.some((entry) => entry.omissionClass === "integration") ? `+${integrationsOmitted} more` : `+${integrationsOmitted} integrations`) : "",
+		];
+		const line = joinSegments([...admitted.map((entry) => entry.text), ...indicators], theme);
+		if (line && visibleWidth(line) <= width) return line;
 	}
-	return fitLine(joinSegments([theme.fg(ROLE.STATUS, `+${fields.statuses.length} integrations`)], theme), width);
+	const hasRuntime = entries.some((entry) => entry.omissionClass === "runtime");
+	const hasIntegrations = entries.some((entry) => entry.omissionClass === "integration");
+	return [hasRuntime ? theme.fg(ROLE.STATUS, "r!") : "", hasIntegrations ? theme.fg(ROLE.STATUS, "i!") : ""].filter(Boolean).join(" ");
 }
 
 // Sidebar groups use structured fields, never positional compact-bar segments
@@ -237,16 +256,49 @@ export function renderShellSidebarBar(model: ShellBarModel, theme: ShellBarTheme
 
 export function renderShellBar(model: ShellBarModel, theme: ShellBarTheme, width: number): string[] {
 	const fields = buildFields(model, theme);
+	if (width <= 0) return [];
+	if (width < 5) {
+		const status = fields.statuses.find((candidate) => visibleWidth(candidate) <= width);
+		return status ? [fitLine("!", width), fitLine("r!", width), status] : [fitLine("!", width), fitLine("r!", width)];
+	}
 	const complete = joinSegments([fields.brand, fields.project, fields.model, fields.context[0], fields.cost, fields.usage?.[0] ?? "", ...fields.statuses], theme);
 	if (visibleWidth(complete) + (fields.session ? RIGHT_PADDING + visibleWidth(fields.session) : 0) <= width) {
 		const padding = fields.session ? " ".repeat(width - visibleWidth(complete) - visibleWidth(fields.session)) : "";
 		return [complete + padding + (fields.session ?? "")];
 	}
 
+	if (width === 5) {
+		const runtimeOmitted = Boolean(fields.usage);
+		const status = fields.statuses.find((candidate) => visibleWidth(candidate) <= width);
+		if (status) return [fitLine("!", width), runtimeOmitted ? theme.fg(ROLE.STATUS, "r!") : fitLine("!", width), status];
+		const integrationsOmitted = fields.statuses.length > 0;
+		const indicators = [
+			runtimeOmitted ? theme.fg(ROLE.STATUS, "r!") : "",
+			integrationsOmitted ? theme.fg(ROLE.STATUS, "i!") : "",
+		].filter(Boolean).join(" ");
+		return [indicators || fitLine("!", width)];
+	}
+
 	const first = projectLine(fields, theme, width);
 	const secondWithUsage = runtimeLine(fields, theme, width, true);
-	if (fields.statuses.length === 0 && (!fields.usage || secondWithUsage.includesUsage)) return [first, secondWithUsage.line];
-
 	const second = secondWithUsage.includesUsage ? secondWithUsage : runtimeLine(fields, theme, width, false);
-	return [first, second.line, statusLine(fields, theme, width)].map((line) => fitLine(line, width));
+	if (!second.includesCost && !fields.usage && fields.statuses.length === 1 && visibleWidth(fields.statuses[0]) <= width) {
+		return [first, theme.fg(ROLE.STATUS, "r!"), fields.statuses[0]].map((line) => fitLine(line, width));
+	}
+	const entries: SemanticEntry[] = [
+		...(!second.includesCost ? [{ text: fields.cost, omissionClass: "runtime" as const }] : []),
+		...(!second.includesUsage && fields.usage ? [{ text: fields.usage[2], omissionClass: "runtime" as const }] : []),
+		...fields.statuses.map((text) => ({ text, omissionClass: "integration" as const })),
+	];
+	if (entries.length === 0) return [first, second.line];
+	const third = semanticLine(entries, theme, width);
+	const runtimeOmitted = entries.some((entry) => entry.omissionClass === "runtime");
+	const integrationEntries = entries.filter((entry) => entry.omissionClass === "integration");
+	const integrationsOnly = integrationEntries.length ? semanticLine(integrationEntries, theme, width) : "";
+	const integrationFallback = integrationEntries.length ? theme.fg(ROLE.STATUS, `+${integrationEntries.length} integrations`) : "";
+	const runtimeIndicator = theme.fg(ROLE.STATUS, "r!");
+	if (runtimeOmitted && integrationsOnly === integrationFallback && visibleWidth(joinSegments([runtimeIndicator, integrationFallback], theme)) > width) {
+		return [first, runtimeIndicator, integrationsOnly].map((line) => fitLine(line, width));
+	}
+	return [first, second.line, third].filter(Boolean).map((line) => fitLine(line, width));
 }
