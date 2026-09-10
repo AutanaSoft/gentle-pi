@@ -5,7 +5,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
 import { initTheme, type ExtensionAPI, type ExtensionContext } from "@earendil-works/pi-coding-agent";
-import type { TUI } from "@earendil-works/pi-tui";
+import { visibleWidth, type TUI } from "@earendil-works/pi-tui";
 import installGentleShell, { buildShellBarModel, changesShortcut, devBinaryCard, fetchCodexUsage, loadFileDiff, shellGitRunner, openInExternalEditor, type GentlePromptEditor } from "../extensions/gentle-shell.ts";
 import { CHANGE_STATUS } from "../lib/shell-changes.ts";
 import { sidebarState, type SidebarRail } from "../lib/shell-sidebar.ts";
@@ -228,6 +228,51 @@ test("gentleShell installs the footer on session_start when a UI exists", () => 
 	const lines = component.render(120);
 	assert.equal(lines.length, 1);
 	assert.match(lines[0], /main ⟡ gpt-5\.5 · medium/);
+});
+
+test("gentleShell footer factory propagates provider usage and sanitized integration statuses across widths", async () => {
+	const { pi, handlers } = fakePi([
+		{ numstat: "", porcelain: "" },
+		{ numstat: "1\t0\tfooter-only.ts\n", porcelain: " M footer-only.ts\0" },
+	]);
+	gentleShell(pi, { GENTLE_PI_SHELL_CHANGES_WATCH_MS: "off" }, { fetch: fakeFetch({}, false).fetchFn, now: () => 0 });
+	const { ctx, ui } = fakeContext();
+	await fire(handlers, "session_start", ctx);
+	for (const handler of handlers.get("after_provider_response") ?? []) {
+		handler({ status: 200, headers: { "x-codex-primary-used-percent": "62", "x-codex-primary-window-minutes": "300" } }, ctx);
+	}
+
+	const footerData = {
+		getGitBranch: () => "main",
+		getExtensionStatuses: () => new Map([
+			["mcp", "\x1b[38;2;255;0;0mMCP: 3/3 servers\x1b[0m"],
+			["empty", "\n\t"],
+			["engram", "Engram ready"],
+			["review", "Review clean"],
+		]),
+		getAvailableProviderCount: () => 1,
+		onBranchChange: () => () => {},
+	};
+	const factory = ui.footerFactory as (tui: unknown, theme: ShellBarTheme, data: typeof footerData) => { render(width: number): string[] };
+	const footer = factory({ terminal: { rows: 40, columns: 220 }, requestRender() {} }, plainTheme, footerData);
+	for (const width of [220, 160, 120, 100, 80, 55, 42]) {
+		const lines = footer.render(width);
+		assert.ok(lines.length >= 1 && lines.length <= 3, `expected one to three rows at ${width}`);
+		assert.ok(lines.every((line) => line !== "" && visibleWidth(line) <= width), `footer must remain bounded at ${width}`);
+		const output = lines.join("\n");
+		assert.doesNotMatch(output, /\x1b\[/, `extension ANSI must be repainted at ${width}`);
+		assert.ok(lines.every((line) => !line.includes("\t")), `empty status must not leak into a row at ${width}`);
+		const visible = ["MCP: 3\/3 servers", "Engram ready", "Review clean"].filter((status) => new RegExp(status).test(output)).length;
+		const omitted = Number(output.match(/\+(\d+) (?:more|integrations)/)?.[1] ?? 0);
+		assert.equal(visible + omitted, 3, `only non-empty sanitized statuses count at ${width}`);
+		assert.match(output, /codex 5h|r!/, `provider usage propagates or is explicitly omitted at ${width}`);
+		assert.match(output, /\$0\.000 sub|r!/, `cost propagates or is explicitly omitted at ${width}`);
+	}
+	assert.ok(footer.render(80).length > 1, "the installed footer factory must propagate multiline bars");
+
+	await fire(handlers, "tool_execution_end", ctx);
+	assert.ok(ui.widgets.has("gentle-shell-changes"), "/gentle:changes remains its own below-editor widget");
+	assert.doesNotMatch(footer.render(220).join("\n"), /\/gentle:changes/, "footer rows do not absorb the changes command widget");
 });
 
 test("the fullscreen Status rail carries a live digest so a model switch refreshes it", async () => {
