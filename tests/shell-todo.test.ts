@@ -134,7 +134,7 @@ test("renderTodoCard draws the framed list with status glyphs and keeps every li
 	const lines = renderTodoCard(seeded(), plainTheme, 60, { collapsed: false, staleTurns: 0, collapseKey: "ctrl+shift+t" });
 	for (const line of lines) assert.equal(visibleWidth(line), 60, `"${stripAnsi(line)}" is not 60 wide`);
 	const plain = lines.map(stripAnsi);
-	assert.match(plain[0], /^╭─ ❀ Todos · 1 of 3 ─+╮$/);
+	assert.match(plain[0], /^╭─ ❀ Todos ▾ Collapse · 1 of 3 ─+ ctrl\+shift\+t collapse ╮$/);
 	assert.match(plain[1], /^│ ✓ ~Add quiet tool rendering~ +│$/);
 	assert.match(plain[2], /^│ ◐ Fix quiet tools conflict · fixing conflict +│$/);
 	assert.match(plain[3], /^│ ○ Show git bash tails +│$/);
@@ -146,7 +146,7 @@ test("renderTodoCard folds a long list: done tasks become one row and the open o
 	const state = applyTodo(emptyTodo(), { action: "write", tasks }, 1).state;
 	const plain = renderTodoCard(state, plainTheme, 60, { collapsed: false, staleTurns: 0 }).map(stripAnsi);
 	assert.equal(plain.length, 14, "top rule, twelve rows, bottom rule");
-	assert.match(plain[0], /Todos · 25 of 40/);
+	assert.match(plain[0], /Todos ▾ Collapse · 25 of 40/);
 	assert.match(plain[1], /^│ ✓ 25 done +│$/);
 	assert.match(plain[2], /^│ ◐ Task 26 +│$/);
 	assert.match(plain[11], /^│ ○ Task 35 +│$/);
@@ -157,14 +157,103 @@ test("renderTodoCard folds a long list: done tasks become one row and the open o
 	assert.match(folded[1], /^│ ✓ 40 done +│$/);
 });
 
-test("renderTodoCard marks a stale list in the top rule and collapses to the task in progress", () => {
-	const stale = renderTodoCard(seeded(), plainTheme, 70, { collapsed: false, staleTurns: 2, collapseKey: "ctrl+shift+t" }).map(stripAnsi);
-	assert.match(stale[0], /^╭─ ❀ Todos · 1 of 3 ─+ stale · 2 turns ╮$/);
-	const collapsed = renderTodoCard(seeded(), plainTheme, 70, { collapsed: true, staleTurns: 0, collapseKey: "ctrl+shift+t" }).map(stripAnsi);
-	assert.equal(collapsed.length, 3);
-	assert.match(collapsed[0], /^╭─ ❀ Todos · 1 of 3 ─+ ctrl\+shift\+t expand ╮$/);
-	assert.match(collapsed[1], /^│ ◐ Fix quiet tools conflict · fixing conflict +│$/);
-	const idle = applyTodo(emptyTodo(), { action: "write", tasks: [{ title: "Only pending" }] }, 1).state;
-	assert.match(renderTodoCard(idle, plainTheme, 70, { collapsed: true, staleTurns: 0 }).map(stripAnsi)[1], /^│ ○ 1 open +│$/);
+test("renderTodoCard keeps the configured collapse shortcut in the header while stale state remains visible", () => {
+	const freshExpanded = renderTodoCard(seeded(), plainTheme, 70, { collapsed: false, staleTurns: 0, collapseKey: "ctrl+shift+t" }).map(stripAnsi);
+	assert.match(freshExpanded[0], /^╭─ ❀ Todos ▾ Collapse · 1 of 3 ─+ ctrl\+shift\+t collapse ╮$/);
+
+	const freshCollapsed = renderTodoCard(seeded(), plainTheme, 70, { collapsed: true, staleTurns: 0, collapseKey: "ctrl+shift+t" }).map(stripAnsi);
+	assert.equal(freshCollapsed.length, 3);
+	assert.match(freshCollapsed[0], /^╭─ ❀ Todos ▸ Expand · 1 of 3 ─+ ctrl\+shift\+t expand ╮$/);
+	assert.match(freshCollapsed[1], /^│ ◐ Fix quiet tools conflict · fixing conflict +│$/);
+
+	const staleExpanded = renderTodoCard(seeded(), plainTheme, 70, { collapsed: false, staleTurns: 2, collapseKey: "ctrl+shift+t" }).map(stripAnsi);
+	assert.match(staleExpanded[0], /^╭─ ❀ Todos ▾ Collapse · 1 of 3 ─+ ctrl\+shift\+t collapse ╮$/);
+	assert.match(staleExpanded[1], /^│ stale · 2 turns +│$/);
+
+	const staleCollapsed = renderTodoCard(seeded(), plainTheme, 70, { collapsed: true, staleTurns: 2, collapseKey: "ctrl+shift+t" }).map(stripAnsi);
+	assert.match(staleCollapsed[0], /^╭─ ❀ Todos ▸ Expand · 1 of 3 ─+ ctrl\+shift\+t expand ╮$/);
+	assert.match(staleCollapsed[1], /^│ stale · 2 turns +│$/);
+	assert.match(staleCollapsed[2], /^│ ◐ Fix quiet tools conflict · fixing conflict +│$/);
+
+	const fallback = applyTodo(emptyTodo(), { action: "write", tasks: [{ title: "Finished first", status: "done" }, { title: "First pending" }, { title: "Later pending" }] }, 1).state;
+	assert.match(renderTodoCard(fallback, plainTheme, 70, { collapsed: true, staleTurns: 0 }).map(stripAnsi)[1], /^│ ○ First pending +│$/);
+
+	const activeAfterPending = applyTodo(emptyTodo(), { action: "write", tasks: [{ title: "Pending first" }, { title: "Active second", status: "in_progress" }, { title: "Pending third" }] }, 1).state;
+	assert.match(renderTodoCard(activeAfterPending, plainTheme, 70, { collapsed: true, staleTurns: 0 }).map(stripAnsi)[1], /^│ ◐ Active second +│$/);
 	assert.deepEqual(renderTodoCard(emptyTodo(), plainTheme, 70, { collapsed: false, staleTurns: 0 }), []);
+});
+
+test("renderTodoCard keeps English controls visible and falls back to their icons at narrow widths", () => {
+	const expanded = renderTodoCard(seeded(), plainTheme, 70, { collapsed: false, staleTurns: 0, collapseKey: "ctrl+shift+t" }).map(stripAnsi);
+	assert.match(expanded[0], /Todos ▾ Collapse/);
+	assert.match(expanded[0], /ctrl\+shift\+t collapse/);
+	const collapsed = renderTodoCard(seeded(), plainTheme, 70, { collapsed: true, staleTurns: 0, collapseKey: "ctrl+shift+t" }).map(stripAnsi);
+	assert.match(collapsed[0], /Todos ▸ Expand/);
+	for (const [collapsedState, icon] of [[false, "▾"], [true, "▸"]] as const) {
+		const line = renderTodoCard(seeded(), plainTheme, 16, { collapsed: collapsedState, staleTurns: 0, collapseKey: "ctrl+shift+t" })[0]!;
+		assert.match(stripAnsi(line), new RegExp(`Todos ${icon}`));
+		assert.equal(visibleWidth(line), 16);
+	}
+});
+
+test("completed titles strike only title cells across wrapped lines, never padding or rails", () => {
+	const theme = {
+		fg: (_color: string, text: string) => `\x1b[32m${text}\x1b[39m`,
+		strikethrough: (text: string) => `\x1b[9m${text}\x1b[29m`,
+	};
+	const state = applyTodo(emptyTodo(), { action: "write", tasks: [
+		{ title: "Alpha beta gamma delta epsilon", status: "done" },
+		{ title: "Pending", status: "pending" },
+	] }, 1).state;
+	for (const width of [12, 20, 60]) {
+		const lines = renderTodoCard(state, theme, width, { collapsed: false, staleTurns: 0 });
+		let struckLetters = "";
+		for (const line of lines) {
+			let strike = false, column = 0;
+			const plain = stripAnsi(line);
+			const titleEnd = plain.slice(0, -1).trimEnd().length;
+			for (const token of line.match(/\x1b\[[\d;]*m|[^\x1b]/gu) ?? []) {
+				if (token.startsWith("\x1b")) {
+					for (const code of token.slice(2, -1).split(";").map(Number)) {
+						if (code === 0 || code === 29) strike = false;
+						if (code === 9) strike = true;
+					}
+				} else {
+					if (column < 2 || column >= titleEnd || /[│╭╮╰╯─✓]/u.test(token)) assert.equal(strike, false, `struck frame/padding: ${JSON.stringify(line)}`);
+					if (strike && /[A-Za-z]/.test(token)) struckLetters += token;
+					column += visibleWidth(token);
+				}
+			}
+			assert.equal(strike, false, "SGR 9 must close before the host appends padding");
+			assert.equal(visibleWidth(line), width);
+		}
+		assert.equal(struckLetters, "Alphabetagammadeltaepsilon");
+	}
+});
+
+test("renderTodoCard keeps stale indicators and collapse hints in scrollable lists", () => {
+	const tasks = Array.from({ length: 40 }, (_, index) => ({ title: `Task ${index + 1}`, status: index < 25 ? "done" : "pending" }));
+	const state = applyTodo(emptyTodo(), { action: "write", tasks }, 1).state;
+	const lines = renderTodoCard(state, plainTheme, 70, { scrollable: true, collapsed: false, staleTurns: 2, collapseKey: "alt+t" }).map(stripAnsi);
+	assert.equal(lines.length, 43, "top rule, stale row, every task, bottom rule");
+	assert.match(lines[0], /^╭─ ❀ Todos ▾ Collapse · 25 of 40 ─+ alt\+t collapse ╮$/);
+	assert.match(lines[1], /^│ stale · 2 turns +│$/);
+	assert.match(lines[2], /^│ ✓ ~Task 1~ +│$/);
+	assert.match(lines[41], /^│ ○ Task 40 +│$/);
+	for (const line of lines) assert.equal(visibleWidth(line), 70);
+});
+
+test("renderTodoCard uses custom shortcuts, omits disabled shortcuts, and remains width-safe when hints cannot fit", () => {
+	const custom = renderTodoCard(seeded(), plainTheme, 70, { collapsed: false, staleTurns: 2, collapseKey: "alt+t" }).map(stripAnsi);
+	assert.match(custom[0], /alt\+t collapse/);
+	assert.match(custom[1], /stale · 2 turns/);
+
+	const disabled = renderTodoCard(seeded(), plainTheme, 70, { collapsed: true, staleTurns: 2 }).map(stripAnsi);
+	assert.doesNotMatch(disabled[0], /(?:collapse|expand|ctrl\+shift\+t)/);
+	assert.match(disabled[1], /stale · 2 turns/);
+
+	for (const width of [0, 1, 2, 3, 4, 5, 8, 16]) {
+		const lines = renderTodoCard(seeded(), plainTheme, width, { collapsed: false, staleTurns: 2, collapseKey: "ctrl+shift+t" });
+		for (const line of lines) assert.equal(visibleWidth(line), width, `"${stripAnsi(line)}" is not ${width} wide`);
+	}
 });

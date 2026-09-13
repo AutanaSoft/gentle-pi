@@ -10,11 +10,11 @@ import { WorktreeChangesView } from "../lib/shell-changes-view.ts";
 import { SessionWorktreeRegistry, SESSION_WORKTREE_CHANGED, resolveSessionWorktree, toolWorktreePath, worktreeGitEnvironment, type WorktreeResolver } from "../lib/session-worktree-registry.ts";
 import { CARD_TONE, renderCard, type Card, type CardTheme } from "../lib/shell-card.ts";
 import { GentleAiDevBinaryOverrideError, resolveGentleAiDevBinaryOverride } from "../lib/gentle-ai-binary.ts";
-import { framePromptLines, panelPainter, PROMPT_HINT, PROMPT_STATE, withPromptHint, type PromptState } from "../lib/shell-prompt.ts";
+import { framePromptLines, PROMPT_HINT, PROMPT_STATE, withPromptHint, type PromptState } from "../lib/shell-prompt.ts";
 import { accountIdFromToken, CODEX_PROVIDER, CODEX_USAGE_URL, parseCodexUsage, parseUsageHeaders, UsageStore, type ProviderUsage } from "../lib/shell-usage.ts";
 import { UsageView } from "../lib/shell-usage-view.ts";
 import { sidebarPart } from "../lib/shell-sidebar.ts";
-import { installSidebar } from "../lib/shell-sidebar-layout.ts";
+import { installSidebar, invalidateSidebar } from "../lib/shell-sidebar-layout.ts";
 
 // Gentle Shell: the visual layer gentle-pi puts on top of pi. It installs the
 // status bar, the petal prompt, the working-tree changes widget and overlay,
@@ -29,6 +29,7 @@ export interface ShellFooterData {
 
 interface ShellRenderHost {
 	requestRender(): void;
+	invalidateSidebar?(): void;
 }
 
 interface ShellBarComponent {
@@ -126,7 +127,10 @@ export function createShellBarComponent(
 	dirty: () => number | undefined = () => undefined,
 	usage: () => ProviderUsage | undefined = () => undefined,
 ): ShellBarComponent {
-	const unsubscribe = footerData.onBranchChange(() => host.requestRender());
+	const unsubscribe = footerData.onBranchChange(() => {
+		host.invalidateSidebar?.();
+		host.requestRender();
+	});
 	return {
 		render(width: number) {
 			return renderShellBar(buildShellBarModel(pi, ctx, footerData, { dirty: dirty(), usage: usage() }), theme, width);
@@ -141,7 +145,6 @@ export function createShellBarComponent(
 interface PromptEditorDeps {
 	fg: (color: string, text: string) => string;
 	bold: (text: string) => string;
-	paint?: (line: string) => string;
 	requestRender(): void;
 	pending(): boolean;
 }
@@ -186,7 +189,6 @@ export class GentlePromptEditor extends CustomEditor {
 			borderColor: (text) => this.deps.fg(PROMPT_FRAME_ROLE, text),
 			fg: this.deps.fg,
 			bold: this.deps.bold,
-			paint: this.deps.paint,
 		});
 	}
 
@@ -207,7 +209,6 @@ function installPrompt(ctx: ExtensionContext, onCreated: (prompt: GentlePromptEd
 		const prompt = new GentlePromptEditor(tui, theme, keybindings, {
 			fg: (color, text) => ctx.ui.theme.fg(color as Parameters<typeof ctx.ui.theme.fg>[0], text),
 			bold: (text) => ctx.ui.theme.bold(text),
-			paint: panelPainter(ctx.ui.theme.getBgAnsi("customMessageBg")),
 			requestRender: () => tui.requestRender(),
 			pending: () => ctx.hasPendingMessages(),
 		});
@@ -225,14 +226,16 @@ const GIT_TIMEOUT_MS = 5000;
 const OVERLAY_HEIGHT_RATIO = 0.8;
 const OVERLAY_MIN_ROWS = 8;
 
-export function shellGitRunner(cwd: string, env: NodeJS.ProcessEnv = process.env): GitRunner {
+export function shellGitRunner(cwd: string, env: NodeJS.ProcessEnv = process.env, run: typeof execFile = execFile): GitRunner {
 	// Pi exec cannot replace the inherited environment. Use argv directly and
 	// a complete sanitized environment for discovery, status, and lazy diffs.
 	const childEnv = worktreeGitEnvironment(env);
 	return (args) => new Promise((resolve) => {
-		execFile("git", ["-C", cwd, ...args], {
+		run("git", ["-C", cwd, ...args], {
 			env: childEnv,
 			encoding: "utf8",
+			shell: false,
+			windowsHide: true,
 			timeout: GIT_TIMEOUT_MS,
 			// Pi exec accumulates output without a maxBuffer cap. In particular,
 			// large porcelain inventories must not become partial successful scans.
@@ -330,7 +333,7 @@ async function showChangesOverlay(ctx: ExtensionContext, deps: OverlayDeps): Pro
 				host = tui;
 				view = new WorktreeChangesView(deps.worktrees(), {
 					theme,
-					rows: Math.max(OVERLAY_MIN_ROWS, Math.floor(tui.terminal.rows * OVERLAY_HEIGHT_RATIO)),
+					rows: () => Math.max(OVERLAY_MIN_ROWS, Math.floor(tui.terminal.rows * OVERLAY_HEIGHT_RATIO)),
 					loadDiff: (root, file) => loadFileDiff(deps.git(root), file),
 					onOpen: (root, file) => done({ root, file }),
 					onRefresh: () => void refresh(),
@@ -345,6 +348,7 @@ async function showChangesOverlay(ctx: ExtensionContext, deps: OverlayDeps): Pro
 		if (!openInExternalEditor(host, chosen.file.path, process.env, spawnSync, chosen.root)) ctx.ui.notify("No editor configured. Set $VISUAL or $EDITOR.", "warning");
 	} finally {
 		clearInterval(poll);
+		view?.dispose();
 		view = undefined;
 	}
 }
@@ -393,7 +397,6 @@ function messageText(content: string | Array<{ type: string; text?: string }>): 
 interface CardComponentOptions {
 	expanded: boolean;
 	hint?: string;
-	paint?: (line: string) => string;
 }
 
 function cardComponent(card: Card, theme: CardTheme, options: CardComponentOptions) {
@@ -463,12 +466,14 @@ export default function gentleShell(pi: ExtensionAPI, env: NodeJS.ProcessEnv = p
 		const fetched = await fetchCodexUsage(token, deps.fetch, deps.now());
 		if (!fetched) return;
 		usage.record(fetched);
+		renderHost?.invalidateSidebar?.();
 		renderHost?.requestRender();
 	};
 	pi.on("after_provider_response", (event) => {
 		const parsed = parseUsageHeaders(event.headers, deps.now());
 		if (!parsed) return;
 		usage.record(parsed);
+		renderHost?.invalidateSidebar?.();
 		renderHost?.requestRender();
 	});
 	pi.registerMessageRenderer(REVIEW_PREFLIGHT_TYPE, (message, options, theme) => {
@@ -523,6 +528,7 @@ export default function gentleShell(pi: ExtensionAPI, env: NodeJS.ProcessEnv = p
 	});
 	pi.registerTool({
 		name: "session_worktree_register",
+		renderShell: "self",
 		label: "Register session worktree",
 		description: "Register a worktree used by this session, including earlier work or opaque shell use. Only the same Git clone is accepted. Shows ALL dirty files in that root, including preexisting and untracked files; never infers roots from shell commands or prose.",
 		parameters: { type: "object", required: ["path"], additionalProperties: false, properties: { path: { type: "string", description: "Worktree path to include in this session." } } } as never,
@@ -546,10 +552,16 @@ export default function gentleShell(pi: ExtensionAPI, env: NodeJS.ProcessEnv = p
 		changes = new WorktreeChangesTracker(deps.gitRunner(ctx.cwd), deps.gitRunner, lineCounter, () => sessionRegistry.roots());
 		const tracker = changes;
 		ctx.ui.setFooter((tui, theme, footerData) => {
-			renderHost = tui;
-			const bottom = createShellBarComponent(pi, ctx, tui, theme, footerData, () => tracker.model.files.length, () => usage.get(ctx.model?.provider ?? ""));
+			renderHost = { requestRender: () => tui.requestRender(), invalidateSidebar: () => invalidateSidebar(tui) };
+			const bottom = createShellBarComponent(pi, ctx, renderHost, theme, footerData, () => tracker.model.files.length, () => usage.get(ctx.model?.provider ?? ""));
+			// The Status card paints live session state that no event re-registers a
+			// part for: model, effort, context, cost, session name and extension
+			// statuses. The digest is what keeps the fullscreen memo honest, and it
+			// rebuilds the model exactly as the narrow bottom bar does every frame.
+			const footerModel = () => buildShellBarModel(pi, ctx, footerData, { dirty: tracker.model.files.length, usage: usage.get(ctx.model?.provider ?? "") });
 			const part = sidebarPart(tui, "footer", bottom, {
-				render: (width) => renderShellSidebarBar(buildShellBarModel(pi, ctx, footerData, { dirty: tracker.model.files.length, usage: usage.get(ctx.model?.provider ?? "") }), theme, width),
+				digest: () => JSON.stringify(footerModel()),
+				render: (width) => renderShellSidebarBar(footerModel(), theme, width),
 				invalidate() {},
 			});
 			const uninstall = installSidebar(tui, theme);
@@ -565,7 +577,7 @@ export default function gentleShell(pi: ExtensionAPI, env: NodeJS.ProcessEnv = p
 		ctx.ui.setWidget(
 			DEV_BINARY_WIDGET_KEY,
 			notice
-				? (_tui, theme) => spaced(cardComponent(devBinaryCard(notice), theme, { expanded: true, paint: (line) => theme.bg("customMessageBg", line) }))
+				? (_tui, theme) => spaced(cardComponent(devBinaryCard(notice), theme, { expanded: true }))
 				: undefined,
 		);
 		await tracker.start();

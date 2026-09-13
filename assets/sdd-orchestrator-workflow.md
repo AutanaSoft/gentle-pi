@@ -22,22 +22,37 @@ proposal → design ┘
 
 ## Native SDD Dispatcher
 
-The user expresses intent; they should not have to administer phases manually. For natural-language SDD requests and `/gentle-sdd-continue`, the parent/orchestrator must use the native status engine as the state authority, decide the next phase, and delegate only the phase that status marks ready.
+`gentle-ai sdd-status --contract gentle-ai.sdd-status/v2` is the sole, read-only status authority for every store. The orchestrator carries its projection unchanged; it never reconstructs readiness, selects a replacement action, uses an Engram bypass, or launches a recommendation merely because status displayed it.
 
-Flow:
+`/gentle-sdd-status` only inspects and renders that projection. Only explicitly authorized `/gentle-sdd-continue` may call native `sdd-continue` to prepare a missing change-instance marker; this is not a status fallback and grants no source roots. If native status is unavailable, malformed, or mismatched, stop and report the failure.
 
-```text
-user intent → preflight/init guard → native status engine → phase decision → subagent gets status JSON + generated instructions → artifact/progress write → status recalculation → continue or stop
-```
+## Bounded Planning Routing
 
-Rules:
+For authoritative native status, route only by the bounded `nextRecommended` token and dependency states; never infer a route from prose. Keep genuine blockers in `blockedReasons` and non-blocking diagnostics in `notes`, never in `nextRecommended`, and report them without discarding them to enable a route.
 
-- `/gentle-sdd-status` is a debug/status command, not the main UX.
-- `/gentle-sdd-continue` is the native dispatcher command: resolve status, choose the next ready phase, and carry status/instructions into the subagent prompt.
-- `sdd-apply`, `sdd-verify`, `sdd-sync`, and `sdd-archive` must obey parent-provided native status; they must not reconstruct readiness from prompt inference when status JSON is present.
-- Do not launch a phase when native status marks that dependency `blocked`.
-- `sdd-archive` cannot proceed unless native status says `dependencies.archive` is `ready` or `all_done` — UNLESS the store carve-out is active (`nextRecommended: "resolve-via-engram"`), in which case resolve archive readiness from Engram instead of treating `not_applicable` as a gate failure.
-- **Non-authoritative store carve-out:** when `nextRecommended: "resolve-via-engram"` is set, native status is **not authoritative**. This applies to `artifactStore: engram`, `artifactStore: none`, and `artifactStore: both` when the `openspec/` directory does not exist. For non-authoritative stores: resolve readiness from Engram using the Engram memory tools injected by the memory provider on the change topic keys (`sdd/{change-name}/proposal`, `sdd/{change-name}/spec`, `sdd/{change-name}/design`, `sdd/{change-name}/tasks`, etc.). Do **not** treat `blockedReasons` or `not_applicable` dependency states from the native engine as real blockers when the store carve-out is active.
+| `nextRecommended` | Planning route |
+| --- | --- |
+| `propose` | `sdd-proposal` |
+| `spec` | `sdd-spec` |
+| `design` | `sdd-design` |
+| `tasks` | `sdd-tasks` |
+
+Native unprefixed tokens are the only automatic planning routes. Prefixed or locally derived status tokens never authorize a phase.
+
+These planning routes remain runnable when missing planning artifacts leave `dependencies.apply: blocked`; do not require apply readiness to produce those artifacts. This is a planning-only exception, not permission to run apply or another blocked non-planning phase.
+
+Before any planning launch, stop for ambiguous change selection, unresolved session preflight, or unsafe action context. Carry `actionContext` and prove planned writes are within the authoritative workspace or allowed edit roots; workspace-planning without allowed edit roots remains read-only. Planning does not bypass the init guard, pre-proposal gate, or phase approval requirements.
+
+## Bounded Execution Routing
+
+| Native `nextRecommended` | Pi executor |
+| --- | --- |
+| `apply` | `sdd-apply` |
+| `verify` | `sdd-verify` |
+| `remediate` | `sdd-remediate` |
+| `archive` | `sdd-archive` |
+
+Execute only the selected native action when its dependency and `actionContext` permit it. Unknown, malformed, blocked, or unsupported values stop before work; prose and local routing cannot replace them. `notes` is separate from `blockedReasons` and never gates: report a non-empty `notes` value as informational and proceed when the dependency and `blockedReasons` gates allow. Manual sdd-sync deliberately retains its local resolver and is never automatic native-status dispatch.
 
 ## SDD Status Contract
 
@@ -60,11 +75,11 @@ Do not ask SDD setup questions on session start. The first time the user initiat
 
 **Hard gate:** `openspec/config.yaml`, existing SDD changes, installed `.pi`/global SDD assets, or a todo named "preflight" are not session preflight. They are project context only. Do not mark SDD preflight complete, start `sdd-init`, launch SDD subagents/chains, or move to explore/proposal/spec/design/tasks until this session has an injected `## SDD Session Preflight` block or an equivalent resolution from the canonical authority order below.
 
-Resolve each field in this order: (1) explicit current user/session choice, (2) valid persisted preference, (3) capability or already-selected strategy constraint, (4) canonical documented default, and (5) ask only when the field is genuinely unresolved. If `/gentle:sdd-preflight` cannot be invoked, resolve the same order inline; do not recreate a four-question setup prompt. Missing Engram is a capability constraint that resolves the artifact store to `openspec` unless the user has made an incompatible explicit request, which remains a human decision.
+On the first SDD invocation of EACH new interactive session, confirm the preflight choices even when valid preferences are saved. Persisted preferences and canonical defaults are preselected suggestions, not current-session consent. Offer confirmation of the grouped suggestions or changes; cancellation leaves preflight unresolved. Explicit current-session choices take precedence and, once resolved, are reused throughout that session. If `/gentle:sdd-preflight` is unavailable, perform the same confirmation inline. The parent `subagent_run` dispatch boundary resolves this gate for every shipped SDD agent, prepends the exact rendered `## SDD Session Preflight` block to the existing child `context`, and blocks launch on cancellation or failure. An RPC child consumes that transport but never originates or persists defaults; missing or malformed transport fails closed before process spawn. Only a safely distinguishable standalone headless parent may retain canonical/persisted defaults without UI. Missing Engram constrains the artifact store to `openspec` unless an incompatible explicit request needs a human decision.
 
 Preflight canonical defaults are execution `auto`, artifact store `openspec`, delivery strategy `ask-on-risk`, and review budget `400`; capability and already-selected constraints may narrow them.
 
-Selectors/inputs appear only for genuinely unresolved fields. Defaulted and one-option fields do not prompt; persisted/session values are reused, and an explicit current choice overrides them when presented. `chain_strategy` remains deferred, and `exception-ok` requires explicit `size:exception` acceptance and is never inferred.
+The grouped session confirmation includes defaulted and capability-constrained suggestions. If changes are requested, preselect saved values and omit redundant one-option selectors. Never reinitialize project context merely because a new session needs confirmation. `chain_strategy` remains deferred, and `exception-ok` requires explicit `size:exception` acceptance and is never inferred.
 
 The exact `delivery_strategy` domain accepted by `sdd-tasks` and `sdd-apply` is `ask-on-risk`, `auto-chain`, `single-pr`, or `exception-ok`; above the review threshold, `auto-chain` resolves without asking again.
 
@@ -130,7 +145,9 @@ This gate is MANDATORY and applies in both execution modes; in interactive mode 
 - The proposer receives a confirmed pre-proposal handoff and MUST NOT interview the user or infer consent.
 - Pi's native `gentle-pi.sdd-status` contract remains the sole status contract. Research and pre-proposal state are orchestrator-owned prose and artifacts (`sdd/{change}/research`, `sdd/{change}/preproposal`, `openspec/changes/{change}/research.md`) layered on top — never a native status field.
 
-Runtime note: this runtime declares no evidence grants (`documentation=[]; open-web=[]`), so a SELECTED research lane fail-closes to a `blocked` outcome and blocks proposal readiness until the user deselects research or evidence capability arrives. SDD chains treat research as unselected.
+Runtime mapping: use the injected `## SDD Research Capabilities` resolved from package-approved exact tool names intersected with active tools. Official documentation requires only `fetch_content`; open-web requires ALL FOUR tools: `web_search`, `source_check`, `fetch_content`, and `get_search_content`, each active and approved/reachable in the child. None is optional; inventory admission is not evidence of execution. Preserve explicit agent/source restrictions. The research child receives only reachable approved names in its CLI allowlist and rechecks child-local availability. Generic `mcp` and dynamic `mcp__context7` gateways do not imply authorization for arbitrary servers or remote methods; without a verified narrow route they grant nothing.
+
+Selected supported research MUST run and persist source-backed claims with exact tool calls, URLs, publisher/version, retrieval times, supporting excerpts and claim-to-source IDs. Tool inventory and search snippets are not evidence. Block only genuinely unavailable classes, retain partial results without unvalidated claims, and keep proposal readiness false until every selected class is complete. Never recommend skipping research because of a fictitious blanket restriction, invent citations, or substitute bash for missing tools. SDD chains treat research as unselected.
 
 ## Delivery Strategy
 
@@ -218,10 +235,10 @@ Never persist caller-authored attempt counters, tokens, or state in OpenSpec art
 After the external run completes, call the compact settle with a request ID distinct from acquire, reusing an operation's own ID only for idempotent replay of that exact operation:
 
 ```text
-gentle-ai sdd-attempt settle --cwd <repo> --change <change> --token <token> --request-id <id> --outcome <failed|interrupted|passed> --evidence-revision <sha256:...> --diagnosis <text> --harness-disposition <reused|invalidated> --cleanup-evidence <text> --process-evidence <text>
+gentle-ai sdd-attempt settle --cwd <repo> --change <change> --token <token> --request-id <id> --outcome <failed|interrupted|passed> [--evidence-revision <sha256:...>] --diagnosis <text> --harness-disposition <reused|invalidated> --cleanup-evidence <text> --process-evidence <text>
 ```
 
-Every settle field is required: `cwd`, `change`, `token`, `request-id`, `outcome`, `evidence-revision`, `diagnosis`, `harness-disposition`, `cleanup-evidence`, and `process-evidence`. `evidence-revision` is never `none`. Pass `--successor-lineage` only for a distinct approved successor; the current/bound lineage remains itself otherwise. Pass `--remediates-evidence-revision` only when repairing a specific failed evidence revision. Settle derives binding and remediation inputs; the orchestrator never invents them.
+Every settle field except `evidence-revision` is required: `cwd`, `change`, `token`, `request-id`, `outcome`, `diagnosis`, `harness-disposition`, `cleanup-evidence`, and `process-evidence`. For `failed` or `passed`, include `--evidence-revision` with the `sha256:...` evidence hash. For `interrupted`, omit the entire `--evidence-revision` flag. Pass `--successor-lineage` only for a distinct approved successor; the current/bound lineage remains itself otherwise. Pass `--remediates-evidence-revision` only when repairing a specific failed evidence revision. Settle derives binding and remediation inputs; the orchestrator never invents them.
 
 `status`, `begin`, `finish`, and `reset` are diagnostic/compatibility surfaces, not the normal runtime route. Route continuation only from the provider-returned `proceed|blocked|complete`. `reset` is never automatic and requires an explicit maintainer scope decision.
 
@@ -256,7 +273,25 @@ On Pi, phase model routing is user-owned and persisted, not prompt-passed: `/gen
 | jd-judge-a   | deep-reasoning | Adversarial review                         |
 | jd-judge-b   | deep-reasoning | Adversarial review                         |
 | jd-fix-agent | balanced       | Surgical confirmed fixes                   |
-| default      | balanced       | SDD/JD phase fallback                      |
+| default      | balanced       | SDD phase fallback; never a Judgment Day role |
+
+## Judgment Day fix routing
+
+Judgment Day phase roles are never generic fallbacks. If the generic writer chain is unavailable, use the documented native generic fallback or stop. Judgment Day is independent: it neither enables nor replaces ordinary review; a separately requested ordinary review remains independent. A standalone Judgment Day fix requires no graph-v1 or native review lineage. Launch `jd-fix-agent` only for an explicit Judgment Day fix batch with this exact runtime-accepted Markdown shape: `## Judgment Day activation` contains only `User explicitly requested Judgment Day.`. Replace the example ID, frozen ledger hash, row data, and surface with controller-authorized values. The correction batch contains only one round (`1 of 2` or `2 of 2`) and one lowercase SHA-256. The exact frozen finding rows are one JSON object per line, use only the canonical row fields, and exactly match the authorized IDs.
+
+```markdown
+## Judgment Day activation
+User explicitly requested Judgment Day.
+## Exact authorized severe IDs
+- `JD-A-001`
+## Judgment Day correction batch
+Round: 1 of 2.
+Frozen ledger SHA-256: `aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa`
+## Exact frozen finding rows
+{"id":"JD-A-001","lens":"judgment-day","location":"path/to/authorized-file.ts:1","severity":"CRITICAL","status_at_freeze":"open","evidence_class":"deterministic","evidence_claim":"Concrete user-impact claim supported by the frozen location."}
+## Allowed edit surfaces
+path/to/authorized-file.ts
+```
 
 ## Sub-Agent Launch Deduplication
 
@@ -310,9 +345,7 @@ Automatic mode does not override reviewer burnout protection.
 
 ## Recovery
 
-- `engram` → resolve state with the injected memory search/get tools on the change topic keys (`sdd/{change-name}/...`).
-- `openspec` → read `openspec/changes/<change>/` artifacts and re-derive readiness through the native status engine.
-- `none` → state is not persisted; explain the limitation.
+For every store, request a fresh native v2 status projection. Artifact reads may supply phase inputs only after native selection; they never re-derive readiness, replace status, or bypass native refusal. Manual sdd-sync keeps its separate local resolver.
 
 ## Provider Defect Handoff
 

@@ -5,9 +5,10 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
 import { initTheme, type ExtensionAPI, type ExtensionContext } from "@earendil-works/pi-coding-agent";
-import { visibleWidth } from "@earendil-works/pi-tui";
+import { visibleWidth, type TUI } from "@earendil-works/pi-tui";
 import installGentleShell, { buildShellBarModel, changesShortcut, devBinaryCard, fetchCodexUsage, loadFileDiff, shellGitRunner, openInExternalEditor, type GentlePromptEditor } from "../extensions/gentle-shell.ts";
 import { CHANGE_STATUS } from "../lib/shell-changes.ts";
+import { sidebarState, type SidebarRail } from "../lib/shell-sidebar.ts";
 import type { ShellBarTheme } from "../lib/shell-bar.ts";
 import { stripAnsi } from "../lib/terminal-theme.ts";
 
@@ -68,7 +69,7 @@ function fakePi(script: GitScript[] = [{ numstat: "", porcelain: "" }]) {
 	const shortcuts = new Map<string, ShortcutRegistration>();
 	const git: string[][] = [];
 	let entries: unknown[] = [];
-	const tools = new Map<string, { execute(id: string, params: unknown, signal: undefined, update: undefined, ctx: ExtensionContext): Promise<unknown> }>();
+	const tools = new Map<string, { renderShell?: string; execute(id: string, params: unknown, signal: undefined, update: undefined, ctx: ExtensionContext): Promise<unknown> }>();
 	const listeners = new Map<string, (data: unknown) => void>();
 	let round = 0;
 	const pi = {
@@ -274,6 +275,49 @@ test("gentleShell footer factory propagates provider usage and sanitized integra
 	assert.doesNotMatch(footer.render(220).join("\n"), /\/gentle:changes/, "footer rows do not absorb the changes command widget");
 });
 
+test("the fullscreen Status rail carries a live digest so a model switch refreshes it", async () => {
+	const { pi, handlers } = fakePi();
+	gentleShell(pi, { GENTLE_PI_SHELL_CHANGES_WATCH_MS: "off" });
+	const entries: unknown[] = [];
+	const { ctx, ui } = fakeContext({ entries });
+	await fire(handlers, "session_start", ctx);
+
+	const statuses = new Map<string, string>();
+	const liveFooterData = { getGitBranch: () => "main", getExtensionStatuses: () => statuses, getAvailableProviderCount: () => 1, onBranchChange: () => () => {} };
+	const tui = { terminal: { rows: 40, columns: 160 }, requestRender() {} };
+	const factory = ui.footerFactory as (tui: unknown, theme: ShellBarTheme, footerData: unknown) => { render(width: number): string[]; dispose(): void };
+	const component = factory(tui, plainTheme, liveFooterData);
+	try {
+		const rail = sidebarState(tui as unknown as TUI).parts.get("footer") as SidebarRail;
+		const live = () => rail.digest?.();
+		assert.equal(typeof rail.digest, "function", "the Status card paints live state and must declare a digest");
+		assert.match(rail.render(46).join("\n"), /gpt-5\.5/);
+
+		const beforeModel = live();
+		(ctx.model as { id: string }).id = "gpt-5.6";
+		assert.notEqual(live(), beforeModel, "/model must change the digest");
+		assert.match(rail.render(46).join("\n"), /gpt-5\.6/);
+
+		const beforeUsage = live();
+		(ctx as unknown as { getContextUsage: () => unknown }).getContextUsage = () => ({ tokens: 200_000, contextWindow: 272_000, percent: 74 });
+		assert.notEqual(live(), beforeUsage, "context usage must change the digest");
+		assert.match(rail.render(46).join("\n"), /74%/);
+
+		const beforeCost = live();
+		entries.push(assistantEntry({ input: 100, output: 20, cost: 0.42 }));
+		assert.notEqual(live(), beforeCost, "session cost must change the digest");
+		assert.match(rail.render(46).join("\n"), /\$0\.420/);
+
+		const beforeStatus = live();
+		statuses.set("mcp", "MCP: 3 servers enabled");
+		assert.notEqual(live(), beforeStatus, "extension statuses have no event and must change the digest");
+		assert.match(rail.render(46).join("\n"), /MCP: 3 servers enabled/);
+		assert.equal(live(), live(), "an unchanged digest still reuses the prepared rail");
+	} finally {
+		component.dispose();
+	}
+});
+
 test("gentleShell stays out of the way without a UI or when disabled", () => {
 	const disabled = fakePi();
 	gentleShell(disabled.pi, { GENTLE_PI_SHELL: "0" });
@@ -305,12 +349,30 @@ test("gentleShell frames the editor with the petal prompt and a hint while empty
 	editor.focused = true;
 	const lines = editor.render(60).map(stripAnsi);
 	assert.match(lines[0], /^╭─ ✿ ─+╮$/);
-	assert.ok(editor.render(60).every((line) => line.endsWith("\x1b[49m")), "prompt lines carry the panel background");
+	assert.doesNotMatch(editor.render(60).join("\n"), /\x1b\[44m/, "prompt must not paint passive backgrounds");
 	assert.match(lines[1], /^│.*type, or \/ for commands +│$/);
 	assert.match(lines[lines.length - 1], /^╰─+╯$/);
 	editor.setText("hola");
 	assert.doesNotMatch(editor.render(60).map(stripAnsi)[1], /type, or/);
 	editor.dispose();
+});
+
+test("registered prompt stays transparent while idle, working, and queued", () => {
+	const { pi, handlers, tools } = fakePi();
+	gentleShell(pi, {});
+	const { ctx, ui } = fakeContext();
+	ctx.ui.theme = { ...plainTheme, getBgAnsi: () => "\x1b[44m" } as typeof ctx.ui.theme;
+	const editor = installedPrompt(ctx, ui, handlers);
+	try {
+		for (const state of ["idle", "working", "queued"]) {
+			if (state === "working") for (const handler of handlers.get("agent_start") ?? []) handler({}, ctx);
+			(ctx as unknown as { hasPendingMessages(): boolean }).hasPendingMessages = () => state === "queued";
+			for (const width of [8, 40, 80]) assert.doesNotMatch(editor.render(width).join("\n"), /\x1b\[44m/, state);
+		}
+	} finally {
+		editor.dispose();
+	}
+	assert.equal(tools.get("session_worktree_register")?.renderShell, "self");
 });
 
 test("gentleShell shows working while the agent runs and queued when messages wait", () => {
@@ -572,6 +634,24 @@ test("loadFileDiff asks git for a HEAD diff, or a no-index diff for untracked fi
 	]);
 });
 
+test("shell Git runner hides initial and repeated background polling children", async () => {
+	const calls: Array<{ command: string; args: readonly string[]; options: Record<string, unknown> }> = [];
+	const run = ((command: string, args: readonly string[], options: Record<string, unknown>, callback: (error: Error | null, stdout: string) => void) => {
+		calls.push({ command, args, options });
+		callback(null, "", "");
+	}) as typeof import("node:child_process").execFile;
+	const git = shellGitRunner("/repo with spaces & metacharacters", { PATH: process.env.PATH }, run);
+	await git(["status", "--porcelain=v1", "-z"]);
+	await git(["status", "--porcelain=v1", "-z"]);
+	assert.equal(calls.length, 2, "the same safe runner serves startup and repeated polling");
+	for (const call of calls) {
+		assert.equal(call.command, "git");
+		assert.deepEqual(call.args, ["-C", "/repo with spaces & metacharacters", "status", "--porcelain=v1", "-z"]);
+		assert.equal(call.options.shell, false);
+		assert.equal(call.options.windowsHide, true);
+	}
+});
+
 test("openInExternalEditor stops the TUI around the editor and honors $VISUAL over $EDITOR", () => {
 	const events: string[] = [];
 	const host = { stop: () => events.push("stop"), start: () => events.push("start"), requestRender: (force?: boolean) => events.push(`render:${force}`) };
@@ -740,6 +820,10 @@ test("gentleShell draws the review preflight message as a Gentle card", () => {
 	const renderer = renderers.get("gentle-pi.review-preflight");
 	assert.ok(renderer, "renderer not registered");
 	const message = { customType: "gentle-pi.review-preflight", content: "Receipt-driven development is enabled.\n\nCall the gentle_review tool." };
+	const sentinelTheme = { ...plainTheme, bg: (_role: string, text: string) => `\x1b[44m${text}\x1b[49m` };
+	for (const expanded of [true, false]) {
+		assert.doesNotMatch(renderer(message, { expanded }, sentinelTheme).render(80).join("\n"), /\x1b\[44m/);
+	}
 	const expanded = renderer(message, { expanded: true }, plainTheme).render(80).map(stripAnsi);
 	assert.match(expanded[0], /^╭─ ✿ Gentle AI · review preflight ─+ .*collapse ╮$/);
 	assert.match(expanded[1], /^│ Receipt-driven development is enabled\. +│$/);
@@ -761,6 +845,11 @@ test("gentleShell keeps a dev-binary override visible above the editor for the w
 	assert.match(lines[1], /^│ \/Users\/me\/go\/bin\/gentle-ai · sha256:6e53bfc6305a3949 +│$/);
 	assert.match(lines[2], /^╰─+╯$/);
 	assert.equal(lines[3], "", "a blank line keeps the card off the prompt frame");
+	const painted = factory(fakeTui, { ...plainTheme, bg: (_role: string, text: string) => `\x1b[44m${text}\x1b[49m` }).render(100);
+	assert.equal(painted[0], lines[0], "top frame cells have no background");
+	assert.equal(painted[1], lines[1], "body interior remains transparent");
+	assert.equal(painted[2], lines[2], "bottom frame cells have no background");
+	assert.equal(painted[3], "", "external spacer has no background");
 	await fire(handlers, "agent_start", ctx);
 	assert.equal(ui.widgets.has("gentle-shell-dev-binary"), false, "the startup notice leaves with the first prompt");
 

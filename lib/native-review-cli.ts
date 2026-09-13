@@ -65,7 +65,11 @@ export const NATIVE_REVIEW_OPERATION = {
 	CAPTURE_RESULT: "review/capture-result",
 	CAPTURE_CORRECTION_PLAN: "review/capture-correction-plan",
 	CAPTURE_PROVIDER_ROLE: "review/capture-provider-role",
+	CAPTURE_UNACHIEVABLE: "review/capture-unachievable",
 	ACKNOWLEDGE_APPROVED: "review/acknowledge-approved",
+	SDD_STATUS: "sdd-status",
+	SDD_ATTEMPT: "sdd-attempt",
+	SDD_CONTINUE: "sdd-continue",
 } as const;
 export type NativeReviewOperation = (typeof NATIVE_REVIEW_OPERATION)[keyof typeof NATIVE_REVIEW_OPERATION];
 
@@ -106,6 +110,8 @@ export interface NativeReviewCli {
 	captureResult?(request: NativeReviewCaptureResultRequest): Promise<NativeReviewCaptureResultOutcome>;
 	captureCorrectionPlan?(request: NativeReviewCorrectionPlanCaptureRequest): Promise<ReviewLastEventClosureV1>;
 	captureProviderRole?(request: NativeReviewProviderRoleCaptureRequest): Promise<NativeReviewProviderRoleCaptureOutcome>;
+	// gentle-pi#638: records the host relay's declaration that one bound selected lens slot cannot be completed under current conditions. Younger than every binary pinned in NATIVE_CLI_CONTRACTS, so the capability is gated invocation-adjacent (see isNativeReviewUnachievableVerbRefused) instead of by a contract row.
+	captureUnachievableLens?(request: NativeReviewUnachievableLensCaptureRequest): Promise<NativeReviewUnachievableLensCaptureArtifact>;
 	// Dark until a negotiated version reports the `mode` capability true
 	// (Design Decision #7, organic-rdd-parity). Plain versioned CLI operation,
 	// outside the negotiated review-integration protocol — same shape as
@@ -116,6 +122,44 @@ export interface NativeReviewCli {
 	// an older binary without the verb, or any other process/decode failure,
 	// rejects the returned promise -- callers fail closed to `high` risk.
 	assess?(request: NativeReviewAssessRequest): Promise<ReviewAssessmentV1>;
+	// Exact native SDD readiness authority for an explicitly selected phase.
+	// This is intentionally separate from review/RDD gates and carries no
+	// delivery or review-transaction authority.
+	sddStatus?(request: NativeSddStatusRequest): Promise<NativeSddStatusV2>;
+	sddContinue?(request: NativeSddStatusRequest): Promise<NativeSddStatusV2>;
+	sddAttemptAcquire?(request: NativeSddAcquireRequest): Promise<NativeSddAttemptResult>;
+	sddAttemptSettle?(request: NativeSddSettleRequest): Promise<NativeSddAttemptResult>;
+}
+
+export interface NativeSddAttemptRequest extends Pick<NativeUntrackedSelectionRequest, "untrackedScope" | "expectedUntrackedInventory" | "intendedUntracked"> {
+	workspaceRoot: string;
+	changeName: string;
+	requestId: string;
+	remediatesEvidenceRevision?: string;
+}
+export interface NativeSddAcquireRequest extends NativeSddAttemptRequest {
+	workUnit: string;
+	evidenceGoal: string;
+	maxAttempts?: number;
+	maxChangedLines?: number;
+	expectedRevision?: string;
+	token?: string;
+}
+export const SDD_ATTEMPT_OUTCOME = { PASSED: "passed", FAILED: "failed", INTERRUPTED: "interrupted" } as const;
+export interface NativeSddSettleRequest extends NativeSddAttemptRequest {
+	token: string;
+	outcome: (typeof SDD_ATTEMPT_OUTCOME)[keyof typeof SDD_ATTEMPT_OUTCOME];
+	evidenceRevision?: string;
+	remediationEvidence?: string;
+	diagnosis: string;
+	harnessDisposition: "reused" | "invalidated";
+	cleanupEvidence: string;
+	processEvidence: string;
+}
+export interface NativeSddAttemptResult {
+	state: "proceed" | "blocked" | "complete";
+	token?: string;
+	reason?: string;
 }
 
 export const NATIVE_REVIEW_MODE_OPERATION = {
@@ -151,6 +195,35 @@ export const NATIVE_REVIEW_MODE_SCOPE = {
 	BOTH: "both",
 } as const;
 export type NativeReviewModeScope = (typeof NATIVE_REVIEW_MODE_SCOPE)[keyof typeof NATIVE_REVIEW_MODE_SCOPE];
+
+export interface NativeSddStatusRequest {
+	changeName?: string;
+	workspaceRoot: string;
+	signal?: AbortSignal;
+}
+
+export type NativeSddPhase = "apply" | "verify" | "archive";
+export type NativeSddDependencyState = "blocked" | "ready" | "all_done";
+
+/**
+ * The native CLI owns this complete v2 record. The decoder validates the fields
+ * Pi relies on and returns the original object without adding, omitting, or
+ * reconciling local SDD state.
+ */
+export interface NativeSddStatusV2 extends Readonly<Record<string, unknown>> {
+	schemaName: "gentle-ai.sdd-status";
+	schemaVersion: 2;
+	changeName: string | null;
+	artifactStore: "openspec" | "engram" | "hybrid" | "none";
+	planningHome: Readonly<Record<string, unknown>> & { mode: "repo-local"; path: string };
+	changeRoot: string | null;
+	actionContext: Readonly<Record<string, unknown>> & { mode: "repo-local"; workspaceRoot: string; allowedEditRoots: readonly string[] };
+	dependencies: Readonly<Record<(typeof NATIVE_SDD_DEPENDENCIES)[number], NativeSddDependencyState>>;
+	phaseInstructions?: Readonly<Record<(typeof NATIVE_SDD_INSTRUCTION_PHASES)[number], readonly string[]>>;
+	blockedReasons: readonly string[];
+	nextRecommended: string;
+	remediationState?: { required: boolean; complete: boolean; failedEvidenceRevision: string };
+}
 
 export interface NativeReviewModeRequest {
 	cwd: string;
@@ -429,6 +502,49 @@ export interface NativeReviewProviderRoleCaptureArtifact {
 	readonly targetIdentity: string;
 	readonly role: string;
 	readonly captured: true;
+}
+
+// gentle-pi#638: the typed declaration that one bound selected lens slot cannot be completed under current conditions. Mirrored from Go's reviewUnachievableLensCaptureArtifact (internal/cli/review_capture_unachievable.go): same schema identity, same closed field set, and the same 512-byte detail bound Go enforces, so a declaration this client refuses locally can never reach a binary that would accept it, and vice versa.
+export const NATIVE_REVIEW_UNACHIEVABLE_LENS_CAPTURE_SCHEMA = "gentle-ai.review-capture-unachievable/v1";
+export const NATIVE_REVIEW_UNACHIEVABLE_LENS_DETAIL_LIMIT = 512;
+
+export interface NativeReviewUnachievableLensCaptureRequest {
+	/** Exact frozen review lineage identifier of the offered slot. */
+	readonly lineageId: string;
+	/** Exact frozen target identity of the offered slot. */
+	readonly targetIdentity: string;
+	/** Exact reviewing-authority revision the collect transition offered. */
+	readonly expectedRevision: string;
+	/** The offered slot's subject-hash; Go resolves the lens from it. */
+	readonly requestHash: string;
+	/** Short machine-readable cause, e.g. relay_transport_bound_exceeded. */
+	readonly reason: string;
+	/** Optional bounded evidence; refused above the Go-side byte limit. */
+	readonly detail?: string;
+	/** Opaque provider-issued repository context the slot carried, if any. */
+	readonly repositoryContext?: string;
+	/** Process working directory only; never rendered into the invocation. */
+	readonly cwd: string;
+	readonly signal?: AbortSignal;
+}
+
+export interface NativeReviewUnachievableLensCaptureArtifact {
+	readonly schema: typeof NATIVE_REVIEW_UNACHIEVABLE_LENS_CAPTURE_SCHEMA;
+	readonly lineageId: string;
+	readonly targetIdentity: string;
+	readonly lens: string;
+	readonly selectedOrder: number;
+	readonly reason: string;
+	readonly recorded: true;
+}
+
+// gentle-pi#638 fail-open capability gate: `review capture-unachievable` is younger than every released binary pinned in NATIVE_CLI_CONTRACTS, so the verb is gated invocation-adjacent instead of by a capability row. An older binary renders Go's exact `unknown review command "capture-unachievable"` refusal (internal/cli/review_facade.go) on stderr with no stdout, so the invocation rejects before any decode and the captured diagnostics are the only place that text survives. Every other failure -- a typed binding-mismatch refusal, a timeout, a decode failure -- is a real outcome the caller must surface, never a capability signal. Duck-typed on purpose: the classifier must survive a duplicated module instance exactly like the error it inspects.
+const NATIVE_REVIEW_UNKNOWN_UNACHIEVABLE_VERB_REFUSAL = /unknown review command "capture-unachievable"/;
+
+export function isNativeReviewUnachievableVerbRefused(error: unknown): boolean {
+	if (typeof error !== "object" || error === null) return false;
+	const stderr = (error as { diagnostics?: { stderr?: unknown } }).diagnostics?.stderr;
+	return typeof stderr === "string" && NATIVE_REVIEW_UNKNOWN_UNACHIEVABLE_VERB_REFUSAL.test(stderr);
 }
 
 /** Refuter and validator captures close only when they are the native last event. */
@@ -874,7 +990,7 @@ export class NativeReviewCliError extends Error {
 		this.launchAttempted = launchAttempted;
 		this.mutating = mutating;
 		this.mutationOutcome = launchAttempted && mutating ? "unknown" : "none";
-		this.nextAction = this.mutationOutcome === "unknown" ? "review.status" : undefined;
+		this.nextAction = this.mutationOutcome === "unknown" && operation !== NATIVE_REVIEW_OPERATION.SDD_ATTEMPT ? "review.status" : undefined;
 		this.diagnostics = diagnostics ?? { operation, error_code: code, timed_out: false, output_limit_exceeded: false };
 		this.auditRecord = auditRecord;
 	}
@@ -1297,6 +1413,46 @@ interface NativeJsonExecution {
 	body: Record<string, unknown>;
 	exitCode: number;
 	process: ExecFileResult;
+}
+
+const NATIVE_SDD_DEPENDENCIES = ["proposal", "specs", "design", "tasks", "apply", "verify", "archive"] as const;
+const NATIVE_SDD_INSTRUCTION_PHASES = ["apply", "verify", "remediate", "archive"] as const;
+const NATIVE_SDD_NEXT_RECOMMENDATIONS = ["apply", "verify", "remediate", "archive", "archived", "resolve-blockers", "sdd-new", "select-change", "propose", "spec", "design", "tasks"] as const;
+const NATIVE_SDD_DEPENDENCY_STATES = ["blocked", "ready", "all_done"] as const;
+
+/** Strictly validates the native v2 contract while preserving its whole record. */
+export function decodeNativeSddStatusV2(value: unknown, request: Pick<NativeSddStatusRequest, "changeName" | "workspaceRoot">): NativeSddStatusV2 {
+	const status = object(value);
+	if (status.schemaName !== "gentle-ai.sdd-status" || status.schemaVersion !== 2) throw new Error("wrong native SDD status schema");
+	if ((request.changeName !== undefined && status.changeName !== request.changeName) || (status.changeName !== null && !isCanonicalProcessString(status.changeName))) throw new Error("native SDD status change identity mismatch");
+	const artifactStore = enumString(status.artifactStore, ["openspec", "engram", "hybrid", "none"]);
+	const planningHome = object(status.planningHome);
+	if (planningHome.mode !== "repo-local" || !isCanonicalProcessString(planningHome.path)) throw new Error("invalid native SDD planning home");
+	const expectedOpenSpecHome = join(request.workspaceRoot, "openspec");
+	if (planningHome.path !== expectedOpenSpecHome && !((artifactStore === "engram" || artifactStore === "hybrid") && planningHome.path === "engram:sdd")) throw new Error("native SDD planning home escaped its workspace");
+	if (status.changeRoot !== null && !isCanonicalProcessString(status.changeRoot)) throw new Error("invalid native SDD change root");
+	const actionContext = object(status.actionContext);
+	if (actionContext.mode !== "repo-local" || actionContext.workspaceRoot !== request.workspaceRoot || !isCanonicalProcessString(actionContext.workspaceRoot)) throw new Error("native SDD status workspace root mismatch");
+	const allowedEditRoots = stringArray(actionContext.allowedEditRoots);
+	if (!allowedEditRoots.includes(request.workspaceRoot) || allowedEditRoots.some((root) => !isAbsolute(root) || root !== join(root))) throw new Error("invalid native SDD allowed edit roots");
+	const dependencies = object(status.dependencies);
+	for (const phase of NATIVE_SDD_DEPENDENCIES) {
+		if (enumString(dependencies[phase], NATIVE_SDD_DEPENDENCY_STATES) !== dependencies[phase]) throw new Error("invalid native SDD dependency");
+	}
+	if (Object.keys(dependencies).length !== NATIVE_SDD_DEPENDENCIES.length) throw new Error("native SDD dependencies have an unsupported shape");
+	if (status.instructions !== undefined) throw new Error("native SDD status uses phaseInstructions, not instructions");
+	if (status.phaseInstructions !== undefined) {
+		const instructions = object(status.phaseInstructions);
+		for (const phase of NATIVE_SDD_INSTRUCTION_PHASES) stringArray(instructions[phase]);
+		if (Object.keys(instructions).length !== NATIVE_SDD_INSTRUCTION_PHASES.length) throw new Error("native SDD instructions have an unsupported shape");
+	}
+	if (status.nextRecommended === "remediate" || status.remediationState !== undefined) {
+		const remediation = object(status.remediationState);
+		if (typeof remediation.required !== "boolean" || typeof remediation.complete !== "boolean" || typeof remediation.failedEvidenceRevision !== "string" || (remediation.failedEvidenceRevision !== "" && !/^sha256:[0-9a-f]{64}$/.test(remediation.failedEvidenceRevision)) || (status.nextRecommended === "remediate" && (!remediation.required || remediation.complete || !remediation.failedEvidenceRevision))) throw new Error("Invalid native remediation state");
+	}
+	stringArray(status.blockedReasons);
+	enumString(status.nextRecommended, NATIVE_SDD_NEXT_RECOMMENDATIONS);
+	return status as NativeSddStatusV2;
 }
 
 class NativeReviewPlainCli {
@@ -1829,6 +1985,23 @@ function decodeNativeProviderRoleCaptureArtifact(value: unknown): NativeReviewPr
 	});
 }
 
+// gentle-pi#638: the recorded declaration Go prints for one unachievable slot. Closed key set, exact schema identity, and the lens Go itself resolved from the request hash -- the host never asserts which lens failed, only reads back the one the provider bound.
+function decodeNativeUnachievableLensCaptureArtifact(value: unknown): NativeReviewUnachievableLensCaptureArtifact {
+	if (typeof value !== "object" || value === null || Array.isArray(value)) throw new TypeError("native unachievable lens capture artifact must be an object");
+	const body = value as Record<string, unknown>;
+	const allowed = new Set(["schema", "lineage_id", "target_identity", "lens", "selected_order", "reason", "recorded"]);
+	for (const key of Object.keys(body)) if (!allowed.has(key)) throw new TypeError(`native unachievable lens capture artifact carries unexpected key ${key}`);
+	const text = (key: string): string => {
+		const found = body[key];
+		if (typeof found !== "string" || found.trim() !== found || found.length === 0) throw new TypeError(`native unachievable lens capture artifact ${key} must be a non-empty trimmed string`);
+		return found;
+	};
+	if (text("schema") !== NATIVE_REVIEW_UNACHIEVABLE_LENS_CAPTURE_SCHEMA) throw new TypeError(`native unachievable lens capture artifact schema must be ${NATIVE_REVIEW_UNACHIEVABLE_LENS_CAPTURE_SCHEMA}`);
+	if (typeof body.selected_order !== "number" || !Number.isSafeInteger(body.selected_order) || body.selected_order < 0) throw new TypeError("native unachievable lens capture artifact selected_order must be a non-negative integer");
+	if (body.recorded !== true) throw new TypeError("native unachievable lens capture artifact must report recorded: true");
+	return Object.freeze({ schema: NATIVE_REVIEW_UNACHIEVABLE_LENS_CAPTURE_SCHEMA, lineageId: text("lineage_id"), targetIdentity: text("target_identity"), lens: text("lens"), selectedOrder: body.selected_order, reason: text("reason"), recorded: true });
+}
+
 export class NativeReviewCliV216 implements NativeReviewCli {
 	private readonly plain: NativeReviewPlainCli;
 	private readonly adapter: ExecFileAdapter;
@@ -1918,6 +2091,89 @@ export class NativeReviewCliV216 implements NativeReviewCli {
 		toleratedStderr: readonly string[] = [],
 	): Promise<NegotiatedExecution> {
 		return this.invoke(operation, cwd, arguments_, mutating, signal, this.executablePath(operation, mutating), toleratedStderr);
+	}
+
+	async sddAttemptAcquire(request: NativeSddAcquireRequest): Promise<NativeSddAttemptResult> {
+		return this.sddAttempt("acquire", request);
+	}
+
+	async sddAttemptSettle(request: NativeSddSettleRequest): Promise<NativeSddAttemptResult> {
+		return this.sddAttempt("settle", request);
+	}
+
+	private async sddAttempt(verb: "acquire" | "settle", request: NativeSddAcquireRequest | NativeSddSettleRequest): Promise<NativeSddAttemptResult> {
+		const args = ["sdd-attempt", verb, "--cwd", request.workspaceRoot, "--change", request.changeName, "--request-id", request.requestId];
+		if (!isAbsolute(request.workspaceRoot) || !isCanonicalProcessString(request.workspaceRoot) || !isCanonicalProcessString(request.changeName) || !/^[a-z0-9][a-z0-9._-]{0,127}$/.test(request.requestId)) throw new TypeError("Invalid SDD attempt identity");
+		const text = (flag: string, value: string, max: number) => {
+			if (!isCanonicalProcessString(value) || /[\r\n]/.test(value) || Buffer.byteLength(value) > max) throw new TypeError(`Invalid ${flag}`);
+			args.push(flag, value);
+		};
+		const revision = (flag: string, value: string | undefined) => {
+			if (value === undefined) return;
+			if (!/^sha256:[0-9a-f]{64}$/.test(value)) throw new TypeError(`Invalid ${flag}`);
+			args.push(flag, value);
+		};
+		if (verb === "acquire") {
+			const acquire = request as NativeSddAcquireRequest;
+			text("--work-unit", acquire.workUnit, 160);
+			text("--evidence-goal", acquire.evidenceGoal, 240);
+			for (const [flag, value, max] of [["--max-attempts", acquire.maxAttempts, 100], ["--max-changed-lines", acquire.maxChangedLines, 1_000_000]] as const) {
+				if (value === undefined) continue;
+				if (!Number.isInteger(value) || value < 1 || value > max) throw new TypeError(`Invalid ${flag}`);
+				args.push(flag, String(value));
+			}
+			if (acquire.expectedRevision === "") args.push("--expected-revision", "");
+			else revision("--expected-revision", acquire.expectedRevision);
+			if (acquire.token !== undefined) text("--token", acquire.token, 500);
+		} else {
+			const settle = request as NativeSddSettleRequest;
+			text("--token", settle.token, 500);
+			if (!Object.values(SDD_ATTEMPT_OUTCOME).includes(settle.outcome)) throw new TypeError("Invalid outcome");
+			args.push("--outcome", settle.outcome);
+			if (settle.outcome === "interrupted" ? settle.evidenceRevision !== undefined || settle.remediationEvidence !== undefined : !settle.evidenceRevision && !(settle.outcome === "passed" && settle.remediationEvidence)) throw new TypeError("Invalid terminal evidence");
+			revision("--evidence-revision", settle.evidenceRevision);
+			text("--diagnosis", settle.diagnosis, 500);
+			if (!["reused", "invalidated"].includes(settle.harnessDisposition)) throw new TypeError("Invalid harness disposition");
+			args.push("--harness-disposition", settle.harnessDisposition);
+			text("--cleanup-evidence", settle.cleanupEvidence, 500);
+			text("--process-evidence", settle.processEvidence, 500);
+			if (settle.remediationEvidence !== undefined) args.push("--remediation-evidence", settle.remediationEvidence);
+		}
+		revision("--remediates-evidence-revision", request.remediatesEvidenceRevision);
+		args.push(...nativeUntrackedSelectionArguments(nativeUntrackedSelection(request)));
+		const operation = NATIVE_REVIEW_OPERATION.SDD_ATTEMPT;
+		const { body } = await this.negotiated(operation, request.workspaceRoot, args, true);
+		return decode(operation, true, () => {
+			const result = body as unknown as NativeSddAttemptResult;
+			if (!result || !["proceed", "blocked", "complete"].includes(result.state)) throw new TypeError("Invalid compact state");
+			if (verb === "acquire" && result.state === "proceed" && !isCanonicalProcessString(result.token)) throw new TypeError("Missing compact token");
+			if (result.reason !== undefined && typeof result.reason !== "string") throw new TypeError("Invalid compact reason");
+			return { state: result.state, ...(result.token === undefined ? {} : { token: result.token }), ...(result.reason === undefined ? {} : { reason: result.reason }) };
+		});
+	}
+
+	async sddStatus(request: NativeSddStatusRequest): Promise<NativeSddStatusV2> {
+		return this.sddProjection(request, false);
+	}
+
+	async sddContinue(request: NativeSddStatusRequest): Promise<NativeSddStatusV2> {
+		if (!isCanonicalProcessString(request.changeName)) throw new TypeError("Native SDD continuation requires an exact selected change");
+		return this.sddProjection(request, true);
+	}
+
+	private async sddProjection(request: NativeSddStatusRequest, mutating: boolean): Promise<NativeSddStatusV2> {
+		if ((request.changeName !== undefined && !isCanonicalProcessString(request.changeName)) || !isCanonicalProcessString(request.workspaceRoot) || !isAbsolute(request.workspaceRoot)) {
+			throw new TypeError("Native SDD status requires a canonical change and absolute workspace root");
+		}
+		const operation = mutating ? NATIVE_REVIEW_OPERATION.SDD_CONTINUE : NATIVE_REVIEW_OPERATION.SDD_STATUS;
+		const execution = await this.negotiated(
+			operation,
+			request.workspaceRoot,
+			[operation, ...(request.changeName === undefined ? [] : [request.changeName]), "--cwd", request.workspaceRoot, "--json", "--instructions"],
+			mutating,
+			request.signal,
+		);
+		return decode(operation, mutating, () => decodeNativeSddStatusV2(execution.body, request));
 	}
 
 	async start(request: NativeStartRequest): Promise<NativeStartResult> {
@@ -2192,6 +2448,25 @@ export class NativeReviewCliV216 implements NativeReviewCli {
 			}
 			return decodeNativeProviderRoleCaptureArtifact(body);
 		});
+	}
+
+	// gentle-pi#638: `gentle-ai review capture-unachievable` records one bound declaration that the exact slot the collect transition offered cannot be completed under current conditions. Unlike every other capture verb the host runs, this one reports a failure instead of a result, so it never takes the provider-issued tokens verbatim: the declaration's binding values are named fields re-derived from the slot, and Go verifies them against the frozen lineage, revision, target, and subject hash before recording anything (internal/cli/review_capture_unachievable.go). A binding that no longer matches is a typed refusal the caller surfaces, never a host-side reconstruction.
+	async captureUnachievableLens(request: NativeReviewUnachievableLensCaptureRequest): Promise<NativeReviewUnachievableLensCaptureArtifact> {
+		for (const [field, value] of (["lineageId", "reason"] as const).map((field) => [field, request[field]] as const)) {
+			if (!isCanonicalProcessString(value)) throw new TypeError(`Native CAPTURE_UNACHIEVABLE ${field} must be a non-empty, trimmed, NUL-free string`);
+		}
+		// The three identity fields are digests on every slot the provider offers, so a non-sha value means the declaration binding was parsed wrong; refuse it locally instead of invoking a doomed process.
+		for (const [field, value] of (["targetIdentity", "expectedRevision", "requestHash"] as const).map((field) => [field, request[field]] as const)) {
+			if (!/^sha256:[0-9a-f]{64}$/.test(value)) throw new TypeError(`Native CAPTURE_UNACHIEVABLE ${field} must be a canonical SHA-256 identity`);
+		}
+		const detail = request.detail === undefined ? "" : request.detail.trim();
+		// gentle-pi#822: the native limit is 512 UTF-8 bytes, not 512 UTF-16 code units — the Go side measures the encoded payload, so a multibyte detail needs Buffer.byteLength; a .length check would let 300 two-byte characters through.
+		if (Buffer.byteLength(detail, "utf8") > NATIVE_REVIEW_UNACHIEVABLE_LENS_DETAIL_LIMIT) throw new TypeError(`Native CAPTURE_UNACHIEVABLE detail exceeds ${NATIVE_REVIEW_UNACHIEVABLE_LENS_DETAIL_LIMIT} bytes`);
+		if (request.repositoryContext !== undefined && !isCanonicalProcessString(request.repositoryContext)) throw new TypeError("Native CAPTURE_UNACHIEVABLE repositoryContext must be a non-empty, trimmed, NUL-free string");
+		const executable = this.executablePath(NATIVE_REVIEW_OPERATION.CAPTURE_UNACHIEVABLE, true);
+		// gentle-pi#822: --repository-context is authoritative and mutually exclusive with a path (the captureProviderRole discipline), so --cwd rides the invocation only when no repository context names it; the process working directory stays request.cwd either way.
+		const execution = await this.invoke(NATIVE_REVIEW_OPERATION.CAPTURE_UNACHIEVABLE, request.cwd, ["review", "capture-unachievable", "--lineage", request.lineageId, "--target", request.targetIdentity, "--expected-revision", request.expectedRevision, "--request-hash", request.requestHash, "--reason", request.reason, ...(detail === "" ? [] : ["--detail", detail]), ...(request.repositoryContext === undefined ? ["--cwd", request.cwd] : ["--repository-context", request.repositoryContext])], true, request.signal, executable);
+		return decode(NATIVE_REVIEW_OPERATION.CAPTURE_UNACHIEVABLE, true, () => decodeNativeUnachievableLensCaptureArtifact(execution.body));
 	}
 
 	// gentle-pi#311 P5: executes one provider-rendered `review.finalize`

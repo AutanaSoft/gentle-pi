@@ -15,7 +15,7 @@ function task(id: string, overrides: Partial<TaskRecord> = {}): TaskRecord {
 	return { id, agent: "explore", mode: "task", prompt: "p", label: "p", cwd: "/r", parentSessionId: "s", status: TASK_STATUS.RUNNING, createdAt: 1000, startedAt: 1000, endedAt: null, model: "gpt-5.6-terra", thinking: undefined, sessionPath: "/sessions/x.jsonl", error: null, result: null, lastStep: "grep", lastActivityAt: 1000, turns: 0, toolCalls: 0, tokens: 34_000, cost: 0.27, ...overrides };
 }
 
-function harness(rows = 8, sessionId?: string) {
+function harness(rows: number | (() => number) = 8, sessionId = "s", canCancel?: (task: TaskRecord) => boolean) {
 	const store = new TaskStore();
 	const events: string[] = [];
 	let renders = 0;
@@ -25,6 +25,7 @@ function harness(rows = 8, sessionId?: string) {
 		store,
 		sessionId,
 		now: () => 61_000,
+		canCancel,
 		onCancel: (entry) => events.push(`cancel:${entry.id}`),
 		onOpen: (entry) => events.push(`open:${entry.id}`),
 		onClose: () => events.push("close"),
@@ -32,6 +33,200 @@ function harness(rows = 8, sessionId?: string) {
 	});
 	return { store, view, events, renders: () => renders };
 }
+
+function clickLabel(view: AgentsView, label: string, width = 60): void {
+	const frame = view.render(width).map(stripAnsi);
+	const y = frame.findIndex((line) => line.includes(label));
+	assert.ok(y >= 0, `${label} must be mouse accessible at ${width} columns`);
+	const x = visibleWidth(frame[y].slice(0, frame[y].indexOf(label)));
+	assert.equal(view.handleMouse(mouse(x, y, width, frame.length, "click"))?.handled, true);
+}
+
+test("narrow navigation enters a direct child, retains manual thread position, and Escape backs out", () => {
+	const { store, view, events } = harness(8);
+	store.add(task("a"));
+	store.add(task("other", { parentSessionId: "other", agent: "foreign" }));
+	for (let i = 0; i < 30; i++) store.apply("a", { type: TASK_EVENT.TEXT, text: `line ${i}\n` }, 2000);
+	assert.match(view.render(40).join("\n"), /Subagent explore/);
+	assert.deepEqual(events, [], "rendering the direct list never activates a child");
+	assert.doesNotMatch(view.render(40).join("\n"), /foreign/);
+	clickLabel(view, "Subagent explore", 40);
+	assert.match(view.render(40).join("\n"), /line 29/);
+	view.handleInput("\x1b[5~");
+	const manual = view.render(40).slice(1, 6);
+	view.handleInput("\x1b");
+	assert.deepEqual(events, []);
+	assert.match(view.render(40).join("\n"), /Subagent explore/);
+	clickLabel(view, "Subagent explore", 40);
+	assert.deepEqual(view.render(40).slice(1, 6), manual);
+	view.render(80);
+	assert.equal(view.selectedTask()?.id, "a");
+	assert.deepEqual(view.render(40).slice(1, 6), manual);
+	view.handleInput("\x1b");
+	assert.match(view.render(40).join("\n"), /Subagent explore/);
+	view.handleInput("\x1b");
+	assert.deepEqual(events, ["close"]);
+	view.dispose();
+});
+
+test("desktop fullscreen and every task action have mouse controls at the split boundary", () => {
+	const { store, view, events } = harness(8, "s");
+	store.add(task("a"));
+	for (let i = 0; i < 30; i++) store.apply("a", { type: TASK_EVENT.TEXT, text: `line ${i}\n` }, 2000);
+	view.render(60);
+	view.handleInput("F");
+	assert.doesNotMatch(view.render(60).join("\n"), /Subagent explore/);
+	view.handleInput("\x1b[5~");
+	const manual = view.render(60).slice(1, 6);
+	clickLabel(view, "Back");
+	clickLabel(view, "Fullscreen");
+	assert.deepEqual(view.render(60).slice(1, 6), manual);
+	clickLabel(view, "Follow");
+	assert.match(view.render(60).join("\n"), /line 29/);
+	clickLabel(view, "Open");
+	clickLabel(view, "Stop");
+	clickLabel(view, "Scope");
+	assert.deepEqual(events, ["open:a", "cancel:a"]);
+	clickLabel(view, "Close");
+	assert.deepEqual(events, ["open:a", "cancel:a", "close"]);
+	view.dispose();
+});
+
+test("tiny frames stay bounded and Close remains clickable whenever a cell exists", () => {
+	for (const rows of [0, 1, 2, 3, 8]) for (const width of [0, 1, 2, 11, 12, 23, 24, 59, 60]) {
+		const { store, view, events } = harness(rows);
+		store.add(task("a"));
+		const frame = view.render(width);
+		assert.ok(frame.length <= rows);
+		for (const line of frame) assert.ok(visibleWidth(line) <= width);
+		if (rows && width) clickLabel(view, "×", width);
+		assert.deepEqual(events, rows && width ? ["close"] : []);
+		view.dispose();
+	}
+});
+
+test("compact footer cycles mouse actions without clipped hit regions", () => {
+	const { store, view, events } = harness(8, "s");
+	store.add(task("a"));
+	view.render(12);
+	view.handleInput("\r");
+	clickLabel(view, "Follow", 12);
+	clickLabel(view, ">", 12);
+	clickLabel(view, "Open", 12);
+	clickLabel(view, ">", 12);
+	clickLabel(view, "Stop", 12);
+	clickLabel(view, ">", 12);
+	clickLabel(view, "Scope", 12);
+	assert.deepEqual(events, ["open:a", "cancel:a"]);
+	view.dispose();
+});
+
+test("manual list wheels remain independent of selection and survive Back and resize", () => {
+	const { store, view } = harness(6);
+	for (let i = 0; i < 10; i++) store.add(task(`t${i}`, { agent: `agent${i}`, createdAt: 1000 - i }));
+	view.render(40);
+	view.handleMouse(mouse(4, 2, 40, 6, "wheel", 5));
+	const viewport = () => view.render(40).slice(1, 4).map((line) => stripAnsi(line).replace("▸", " "));
+	const manual = viewport();
+	assert.match(manual[0], /agent5/);
+	assert.equal(view.selectedTask()?.id, "t0", "wheel scrolling does not change selection");
+	clickLabel(view, "Subagent agent5", 40);
+	view.handleInput("\x1b");
+	assert.match(stripAnsi(view.render(40)[1]), /▸.*Subagent agent5/, "clicking selects the visible child");
+	assert.deepEqual(viewport(), manual, "Back preserves viewport content apart from the intentional selection marker");
+	view.render(80);
+	assert.deepEqual(viewport(), manual);
+	assert.equal(view.selectedTask()?.id, "t5");
+	view.dispose();
+});
+
+test("activating a visible child preserves the manual list offset through Back and height resize", () => {
+	for (const target of [4, 5]) {
+		let rows = 6;
+		const { store, view } = harness(() => rows);
+		for (let i = 0; i < 10; i++) store.add(task(`t${i}`, { agent: `agent${i}`, createdAt: 1000 - i }));
+		view.render(40);
+		for (let i = 0; i < 4; i++) view.handleInput("j");
+		view.render(40);
+		view.handleMouse(mouse(4, 2, 40, rows, "wheel", 1));
+		assert.match(view.render(40)[1], /agent3/);
+		clickLabel(view, `Subagent agent${target}`, 40);
+		assert.equal(view.selectedTask()?.id, `t${target}`);
+		view.handleInput("\x1b");
+		assert.match(view.render(40)[1], /agent3/, "Back restores the manual offset, not selection-following");
+		rows = 20;
+		view.render(40);
+		rows = 6;
+		assert.match(view.render(40)[1], /agent3/, "temporary height clamping must not replace the saved offset");
+		assert.equal(view.selectedTask()?.id, `t${target}`);
+		view.dispose();
+	}
+});
+
+test("resizing a narrow child list to desktop keeps Fullscreen local and completion returns to the list", () => {
+	const { store, view, events } = harness(8);
+	store.add(task("a"));
+	view.render(40);
+	clickLabel(view, "Fullscreen", 80);
+	assert.deepEqual(events, []);
+	store.update("a", { status: TASK_STATUS.COMPLETED, endedAt: 5000 });
+	assert.equal(view.selectedTask(), undefined);
+	assert.doesNotMatch(view.render(80).join("\n"), /Back|Subagent explore/);
+	assert.deepEqual(events, []);
+	view.dispose();
+});
+
+test("fullscreen retains every semantic block and hides Stop for unowned active tasks", () => {
+	const { store, view, events } = harness(8, "s", () => false);
+	const thread = { ...emptyThread(), items: [
+		{ kind: "thinking" as const, text: "reasoning retained" },
+		{ kind: "text" as const, text: "answer retained" },
+		{ kind: "tool" as const, callId: "call", name: "bash", args: {}, output: Array.from({ length: 40 }, (_, i) => `output ${i}`).join("\n"), running: false, isError: false },
+		{ kind: "note" as const, text: "final retained note" },
+	] };
+	store.restore(task("a"), thread);
+	view.render(60);
+	view.handleInput("F");
+	for (let i = 0; i < 12; i++) view.handleInput("\x1b[5~");
+	const seen = new Set<string>();
+	for (let i = 0; i < 50; i++) {
+		const frame = view.render(60).map(stripAnsi);
+		assert.doesNotMatch(frame.at(-2) ?? "", /\[Stop\]/);
+		for (const line of frame.slice(1, 6)) seen.add(line);
+		view.handleMouse(mouse(4, 2, 60, 8, "wheel", 1));
+	}
+	assert.match([...seen].join("\n"), /Thinking[\s\S]*reasoning retained[\s\S]*Text[\s\S]*answer retained[\s\S]*Tool[\s\S]*output 39[\s\S]*Note[\s\S]*final retained note/);
+	view.handleInput("s");
+	assert.deepEqual(events, []);
+	assert.deepEqual(store.thread("a"), thread, "presentation does not mutate retention");
+	view.dispose();
+});
+
+test("narrow unknown origins stay isolated rather than sharing an inferred orchestrator", () => {
+	const { store, view } = harness(8);
+	store.add(task("a", { parentSessionId: "", agent: "alpha" }));
+	store.add(task("b", { parentSessionId: " ", agent: "beta" }));
+	view.handleInput("a");
+	assert.doesNotMatch(view.render(40).join("\n"), /Unknown session|alpha|beta/);
+	assert.equal(view.selectedTask(), undefined);
+	assert.equal(store.list().length, 2, "unknown retained origins remain isolated from presence");
+	view.dispose();
+});
+
+test("presentation changes invalidate pointer geometry before another frame", () => {
+	const { store, view, events } = harness(8);
+	store.add(task("a"));
+	const frame = view.render(80);
+	view.handleInput("F");
+	assert.equal(view.handleMouse(mouse(4, 2, 80, frame.length, "click")), undefined);
+	view.render(80);
+	view.handleInput("\x1b");
+	assert.equal(view.handleMouse(mouse(40, 2, 80, frame.length, "wheel", 1)), undefined);
+	view.handleInput("F");
+	view.handleInput("q");
+	assert.deepEqual(events, ["close"]);
+	view.dispose();
+});
 
 test("renderThreadItem renders labeled text, thinking, tool-output, and note blocks", () => {
 	assert.deepEqual(renderThreadItem({ kind: "text", text: "one two three four" }, plainTheme, 9), ["Text", "  one two", "  three", "  four"]);
@@ -59,25 +254,25 @@ test("AgentsView renders the frame with the task list and the selected thread's 
 	for (const line of lines) assert.equal(visibleWidth(line), 90, `"${stripAnsi(line)}" is not 90 wide`);
 	const plain = lines.map(stripAnsi);
 	assert.equal(plain.length, 8);
-	assert.match(plain[0], /^╭─ ❀ Agents · 1 active · 1 finished ─+ \[× Close\]╮$/);
-	assert.match(plain[1], /▾ Orchestrator s · 2 Subag….*explore · running · gpt-5\.6-terra · 34k · \$0\.27 · 1m00s/);
-	assert.match(plain[2], /▸ └ ◐ Subagent explore.*line 3/, "the thread window follows the tail");
-	assert.match(plain[3], /└ ✓ Subagent worker.*line 4/);
+	assert.match(plain[0], /^╭─ ❀ Agents · this session · 1 active ─+ \[F Fullscreen\] \[× Close\]╮$/);
+	assert.match(plain[1], /▸ └ ◐ Subagent explore.*explore · running · gpt-5\.6-terra · 34k · \$0\.27 · 1m00s/);
+	assert.match(plain[2], /line 3/, "the thread window follows the tail");
+	assert.match(plain[3], /line 4/);
+	assert.doesNotMatch(plain.join("\n"), /Subagent worker|orchestrator/i);
 	assert.match(plain[4], /line 5/);
-	assert.match(plain[6], /j\/k task .* esc close/);
+	assert.match(plain[6], /\[ Follow \].*\[ Open session \].*\[Stop\]/);
 	assert.match(plain[7], /^╰─+╯$/);
 });
 
 test("AgentsView keys move the selection, scroll, follow, cancel, open, and close", () => {
 	const { store, view, events } = harness(8);
 	store.add(task("a"));
-	store.add(task("b", { createdAt: 900, lastActivityAt: 900, status: TASK_STATUS.COMPLETED, endedAt: 5000 }));
+	store.add(task("b", { createdAt: 900, lastActivityAt: 900, status: TASK_STATUS.WAITING }));
 	assert.equal(view.selectedTask()?.id, "a");
 	view.handleInput("j");
 	assert.equal(view.selectedTask()?.id, "b");
-	view.handleInput("c");
-	assert.deepEqual(events, [], "finished tasks cannot be cancelled");
 	view.handleInput("k");
+	assert.deepEqual(events, [], "navigation alone does not cancel");
 	view.handleInput("c");
 	view.handleInput("o");
 	assert.deepEqual(events, ["cancel:a", "open:a"]);
@@ -111,6 +306,54 @@ test("AgentsView subscribes only to the selected task and survives an empty stor
 	assert.equal(renders(), before + 1, "disposed views stay quiet");
 });
 
+test("live-only current panel exposes active children directly at desktop and narrow widths", () => {
+	for (const width of [40, 80]) {
+		const { store, view, events } = harness(12, "s");
+		try {
+			for (const status of [TASK_STATUS.RUNNING, TASK_STATUS.QUEUED, TASK_STATUS.WAITING]) {
+				store.add(task(status, { agent: status, status }));
+			}
+			for (const status of [TASK_STATUS.COMPLETED, TASK_STATUS.FAILED, TASK_STATUS.CANCELLED, TASK_STATUS.TIMED_OUT]) {
+				store.add(task(status, { agent: `history_${status}`, status, endedAt: 60_999 }));
+			}
+			store.add(task("foreign", { agent: "foreign", parentSessionId: "other" }));
+			const frame = view.render(width).map(stripAnsi).join("\n");
+			assert.doesNotMatch(frame, /orchestrator|history_|foreign|finished/i);
+			for (const status of ["running", "queued", "waiting"]) assert.match(frame, new RegExp(`Subagent ${status}`));
+			assert.match(stripAnsi(view.render(width)[1]), /Subagent queued/, "equal creation times sort by ID, with no parent wrapper");
+			assert.equal(view.selectedTask()?.id, "running", "adding earlier-sorted children preserves the existing selection");
+			view.handleInput("k");
+			assert.equal(view.selectedTask()?.id, "queued", "Up selects the preceding live child");
+			const selected = view.selectedTask()!;
+			view.handleInput("k");
+			assert.equal(view.selectedTask()?.id, selected.id, "Up at the first child cannot select a hidden parent wrapper");
+			assert.match(stripAnsi(view.render(width)[1]), /▸.*Subagent queued/);
+			if (width < 60) clickLabel(view, `Subagent ${selected.agent}`, width);
+			view.handleInput("s");
+			assert.deepEqual(events, [`cancel:${selected.id}`]);
+			store.update(selected.id, { status: TASK_STATUS.COMPLETED, endedAt: 61_000 });
+			assert.notEqual(view.selectedTask()?.id, selected.id, "completion removes the selected live row immediately");
+		} finally {
+			view.dispose();
+		}
+	}
+});
+
+test("live-only current panel never promotes retained foreign or unknown tasks into open sessions", () => {
+	const { store, view } = harness(12, "s");
+	try {
+		store.add(task("foreign", { agent: "foreign", parentSessionId: "closed" }));
+		store.add(task("unknown", { agent: "unknown", parentSessionId: "" }));
+		store.add(task("finished", { agent: "finished", status: TASK_STATUS.COMPLETED, endedAt: 61_000 }));
+		assert.equal(view.selectedTask(), undefined);
+		view.handleInput("a");
+		assert.doesNotMatch(view.render(80).map(stripAnsi).join("\n"), /Subagent (foreign|unknown|finished)|Orchestrator closed|Unknown session/);
+		assert.equal(store.list().length, 3, "panel filtering never deletes retained history");
+	} finally {
+		view.dispose();
+	}
+});
+
 function mouse(x: number, y: number, width: number, height: number, type: TuiMouseEvent["type"] = "move", wheelDelta?: number): TuiMouseEvent {
 	return { type, button: type === "move" || type === "wheel" ? "none" : "left", x, y, screenX: x, screenY: y, width, height, shift: false, alt: false, ctrl: false, wheelDelta };
 }
@@ -121,9 +364,9 @@ test("AgentsView pointer regions hover and select task rows without activating, 
 	for (let index = 0; index < 8; index += 1) store.apply("b", { type: TASK_EVENT.TEXT, text: `thread ${index}\n` }, 2000);
 	const lines = view.render(80);
 
-	assert.equal(view.handleMouse(mouse(4, 3, 80, lines.length))?.handled, true, "hover consumes only the task row");
+	assert.equal(view.handleMouse(mouse(4, 2, 80, lines.length))?.handled, true, "hover consumes only the task row");
 	assert.equal(view.selectedTask()?.id, "a", "hover never changes keyboard selection or the displayed thread");
-	assert.equal(view.handleMouse(mouse(4, 3, 80, lines.length, "click"))?.handled, true);
+	assert.equal(view.handleMouse(mouse(4, 2, 80, lines.length, "click"))?.handled, true);
 	assert.equal(view.selectedTask()?.id, "b", "click selects the task and displays its thread");
 	assert.deepEqual(events, [], "click selects the task only; it never opens or cancels");
 	view.render(80);
@@ -141,8 +384,8 @@ test("AgentsView retains narrow keyboard mode after selection and store invalida
 	store.add(task("a"));
 	store.add(task("b", { agent: "b" }));
 	for (let index = 0; index < 3; index += 1) store.apply("b", { type: TASK_EVENT.TEXT, text: `thread ${index}\n` }, 2000);
-	const frame = view.render(40);
-	assert.equal(view.handleMouse(mouse(4, 3, 40, frame.length, "click"))?.handled, true, "pointer selection invalidates hit bounds");
+	view.render(40);
+	view.handleInput("j");
 	view.handleInput("\t");
 	assert.match(view.render(40).map(stripAnsi).join("\n"), /thread 2/, "Tab still enters Details before a pointer-invalidating selection rerenders");
 	view.handleInput("\t");
@@ -152,34 +395,25 @@ test("AgentsView retains narrow keyboard mode after selection and store invalida
 	store.apply("b", { type: TASK_EVENT.TEXT, text: "after update\n" }, 2000);
 	view.handleInput("\t");
 	assert.match(view.render(40).map(stripAnsi).join("\n"), /after update/, "a selected-task update does not discard narrow keyboard knowledge");
-	view.handleInput("k");
-	view.handleInput("k");
+	view.handleInput("\x1b");
 	view.handleInput("\t");
-	assert.equal(view.selectedTask(), undefined, "Tab remains inert for a heading");
-	view.handleInput("\x1b[D");
-	view.handleInput("\x1b[C");
-	view.handleInput("j");
-	assert.ok(view.selectedTask(), "heading Left/Right keeps its existing group behavior");
+	assert.equal(view.selectedTask()?.id, "b", "returning through the list retains its selected child");
 	assert.deepEqual(events, [], "Tab never opens the editor");
 	view.dispose();
 });
 
-test("AgentsView uses a narrow List/Details viewport without changing task, group, editor, or close semantics", () => {
+test("AgentsView narrow drilldown has explicit Back, independent wheel and Open, and global close", () => {
 	const { store, view, events } = harness(6);
 	store.add(task("a"));
 	store.add(task("b", { agent: "b" }));
 	for (let index = 0; index < 8; index += 1) store.apply("b", { type: TASK_EVENT.TEXT, text: `thread ${index}\n` }, 2000);
 	let frame = view.render(40);
 	let top = stripAnsi(frame[0] ?? "");
-	assert.match(top, /\[Details\].*\[×\]/, "narrow headers expose Details and compact Close when both fit");
-	assert.equal(view.handleMouse(mouse(4, 3, 40, frame.length, "click"))?.handled, true);
-	assert.equal(view.selectedTask()?.id, "b", "a narrow task click selects only");
-	assert.deepEqual(events, [], "selecting never opens or stops a task");
-	frame = view.render(40);
-	top = stripAnsi(frame[0] ?? "");
-	const detailsX = visibleWidth(top.slice(0, top.indexOf("[Details]")));
-	assert.equal(view.handleMouse(mouse(detailsX, 0, 40, frame.length, "click"))?.handled, true);
-	assert.equal(view.handleMouse(mouse(detailsX, 0, 40, frame.length, "click")), undefined, "a mode change invalidates old pointer bounds before render");
+	assert.match(top, /\[×\]/, "root has a compact global Close");
+	clickLabel(view, "Subagent b", 40);
+	assert.equal(view.selectedTask()?.id, "b");
+	assert.deepEqual(events, [], "drilldown never opens or stops a task");
+	assert.equal(view.handleMouse(mouse(4, 2, 40, frame.length, "click")), undefined, "a mode change invalidates old pointer bounds before render");
 	frame = view.render(40);
 	top = stripAnsi(frame[0] ?? "");
 	assert.match(top, /\[← Back\]/);
@@ -193,22 +427,17 @@ test("AgentsView uses a narrow List/Details viewport without changing task, grou
 	view.handleInput("\t");
 	assert.match(view.render(40).map(stripAnsi).join("\n"), /Subagent b/, "Tab returns to List");
 	view.handleInput("\t");
+	view.handleInput("o");
+	view.handleInput("\x1b");
 	view.handleInput("k");
-	view.handleInput("k");
-	assert.equal(view.selectedTask(), undefined, "selecting a heading clears detail state");
-	view.handleInput("\t");
-	assert.doesNotMatch(stripAnsi(view.render(40)[0] ?? ""), /\[← Back\]/, "headings keep Tab and Details inert");
-	view.handleInput("\x1b[D");
-	view.handleInput("\x1b[C");
-	view.handleInput("j");
 	view.handleInput("\x0d");
 	view.handleInput("o");
-	assert.deepEqual(events, ["open:a", "open:a"], "Enter and o keep their editor action");
-	assert.equal(view.render(11).length, 1, "width below 12 uses the control-free fallback");
-	assert.equal(view.handleMouse(mouse(0, 0, 11, 1)), undefined);
+	assert.deepEqual(events, ["open:b", "open:a"], "Enter inspects locally; o remains the editor action");
+	assert.equal(view.render(11).length, 1, "width below 12 uses the bounded Close-only fallback");
+	assert.equal(view.handleMouse(mouse(0, 0, 11, 1))?.handled, true, "the tiny Close cell remains hoverable");
 	view.handleInput("\x1b");
 	view.handleInput("q");
-	assert.deepEqual(events, ["open:a", "open:a", "close"], "Escape and q close once without cancelling");
+	assert.deepEqual(events, ["open:b", "open:a", "close"], "q closes once from any level without cancelling");
 	view.dispose();
 });
 
@@ -253,12 +482,12 @@ test("AgentsView clears hover on leave, list scrolling, resize, updates, empty l
 test("AgentsView advertises s to stop an active selection, retains c as an alias, and hides stopping for finished tasks", () => {
 	const { store, view, events } = harness(8);
 	store.add(task("active"));
-	assert.match(stripAnsi(view.render(80).at(-2) ?? ""), /s Stop selected/);
+	assert.match(stripAnsi(view.render(80).at(-2) ?? ""), /\[Stop\]/);
 	view.handleInput("s");
 	view.handleInput("c");
 	assert.deepEqual(events, ["cancel:active", "cancel:active"]);
 	store.update("active", { status: TASK_STATUS.CANCELLED, endedAt: 2000 });
-	assert.doesNotMatch(stripAnsi(view.render(80).at(-2) ?? ""), /Stop selected/);
+	assert.doesNotMatch(stripAnsi(view.render(80).at(-2) ?? ""), /\[Stop\]/);
 	view.handleInput("s");
 	assert.deepEqual(events, ["cancel:active", "cancel:active"], "finished tasks never stop");
 });
@@ -283,7 +512,7 @@ test("AgentsView close control, Escape, and q share rendered bounds and one idem
 	lines = view.render(59);
 	top = stripAnsi(lines[0]);
 	assert.equal(visibleWidth(top), 59, "the narrow header fits its rendered width");
-	assert.match(top, /\[Details\].*\[×\]/, "width 59 uses its narrow mode controls instead of the fallback");
+	assert.match(top, /\[×\]/, "width 59 uses its narrow root instead of the fallback");
 	assert.doesNotMatch(top, /Follow|Open session/, "narrow mode keeps footer controls out when they do not fit");
 
 	lines = view.render(wide);
@@ -308,9 +537,9 @@ test("AgentsView scrolls the task list so the selection stays visible when there
 	const { store, view } = harness(6);
 	for (let index = 0; index < 6; index += 1) store.add(task(`t${index}`, { agent: `agent${index}`, createdAt: 1000 - index, lastActivityAt: 1000 - index }));
 	const listed = () => view.render(80).slice(1, 4).map((line) => stripAnsi(line).slice(0, 24));
-	assert.match(listed()[0], /Orchestrator s/);
-	assert.match(listed()[1], /▸ └ ◐ Subagent agent0/);
-	assert.match(listed()[2], /Subagent agent1/);
+	assert.match(listed()[0], /▸ └ ◐ Subagent agent0/);
+	assert.match(listed()[1], /Subagent agent1/);
+	assert.match(listed()[2], /Subagent agent2/);
 	for (let index = 0; index < 4; index += 1) view.handleInput("j");
 	assert.equal(view.selectedTask()?.id, "t4");
 	assert.match(listed()[2], /▸ └ ◐ Subagent agent4/, "the list scrolls down until the selection is the last visible row");
@@ -324,7 +553,7 @@ test("AgentsView scrolls the task list so the selection stays visible when there
 	assert.match(listed()[2], /Subagent agent3/);
 });
 
-test("AgentsView lists the active session's recent tasks by default and a toggles every session", () => {
+test("AgentsView scopes to live children and toggles only the open-session directory", () => {
 	const { store, view } = harness(12, "s");
 	store.add(task("mine", { agent: "mine" }));
 	store.add(task("theirs", { agent: "theirs", parentSessionId: "other", createdAt: 900, lastActivityAt: 900 }));
@@ -332,19 +561,19 @@ test("AgentsView lists the active session's recent tasks by default and a toggle
 	store.add(task("stale", { agent: "stale", status: TASK_STATUS.COMPLETED, endedAt: 61_000 - 16 * 60_000, createdAt: 800, lastActivityAt: 800 }));
 	const names = () => view.render(80).map(stripAnsi).filter((line) => /[◐✓] Subagent /.test(line)).map((line) => line.match(/[◐✓] Subagent (\w+)/)?.[1]);
 	let plain = view.render(80).map(stripAnsi);
-	assert.match(plain[0], /^╭─ ❀ Agents · this session · 1 active · 1 finished ─+ \[× Close\]╮$/);
-	assert.deepEqual(names(), ["mine", "fresh"], "another session's task and one finished over fifteen minutes ago stay out");
-	assert.match(plain.at(-2) ?? "", /a all sessions/);
+	assert.match(plain[0], /^╭─ ❀ Agents · this session · 1 active ─+ \[F Fullscreen\] \[× Close\]╮$/);
+	assert.deepEqual(names(), ["mine"], "all terminal tasks and foreign retained tasks stay out");
+	assert.match(plain.at(-2) ?? "", /\[Scope\]/);
 	view.handleInput("a");
 	plain = view.render(80).map(stripAnsi);
-	assert.match(plain[0], /^╭─ ❀ Agents · all sessions · 2 active · 2 finished ─+ \[× Close\]╮$/);
-	assert.deepEqual(names(), ["mine", "fresh", "stale", "theirs"], "children stay beneath their actual parent-session heading");
-	assert.match(plain.at(-2) ?? "", /a this session/);
+	assert.match(plain[0], /^╭─ ❀ Agents · all sessions · 1 active ─+ \[F Fullscreen\] \[× Close\]╮$/);
+	assert.deepEqual(names(), ["mine"], "retained foreign tasks cannot manufacture open orchestrators");
+	assert.match(plain.at(-2) ?? "", /\[Scope\]/);
 	view.handleInput("j");
-	assert.equal(view.selectedTask()?.id, "fresh", "child-first navigation stays within the current orchestrator group");
+	assert.equal(view.selectedTask()?.id, "mine", "navigation stops at the only live child");
 	view.handleInput("a");
 	assert.equal(view.selectedTask()?.id, "mine", "a new scope reads from the top");
-	assert.deepEqual(names(), ["mine", "fresh"]);
+	assert.deepEqual(names(), ["mine"]);
 });
 
 test("AgentsView footer buttons follow, open only a session-backed selection, and clear stale geometry", () => {
@@ -354,8 +583,8 @@ test("AgentsView footer buttons follow, open only a session-backed selection, an
 	const width = 160;
 	const lines = view.render(width);
 	const footerY = lines.length - 2;
-	const followX = 131;
-	const openX = 142;
+	const followX = 2;
+	const openX = 13;
 	assert.match(stripAnsi(lines.at(-2) ?? ""), /\[ Follow \].*\[ Open session \]/, "buttons render only after the full key-hint row fits");
 
 	view.handleInput("\x1b[5~");
@@ -375,8 +604,8 @@ test("AgentsView footer buttons follow, open only a session-backed selection, an
 	assert.equal(view.handleMouse(mouse(openX, footerY, width, lines.length, "click")), undefined, "Open is disabled when the selected task loses its session path");
 	assert.deepEqual(events, ["open:a"]);
 	view.render(200);
-	assert.equal(view.handleMouse(mouse(followX, footerY, 200, lines.length, "click")), undefined, "resize discards the old footer geometry before routing clicks");
-	assert.doesNotMatch(stripAnsi(view.render(44).at(-2) ?? ""), /\[ Follow \]|\[ Open session \]/, "buttons hide instead of truncating when the rendered key hints do not fit");
+	assert.equal(view.handleMouse(mouse(followX, footerY, width, lines.length, "click")), undefined, "resize discards the old footer geometry before routing clicks");
+	assert.match(stripAnsi(view.render(44).at(-2) ?? ""), /Follow|Open/, "controls take priority over keyboard hints");
 	view.handleInput("a");
 	assert.equal(view.handleMouse(mouse(followX, footerY, width, lines.length, "click")), undefined, "a scope change clears old footer geometry until the next frame");
 	view.dispose();
@@ -434,6 +663,7 @@ test("AgentsView rejects cached-height pointer input before the live resize rend
 		theme: plainTheme,
 		rows: () => rows,
 		store,
+		sessionId: "s",
 		now: () => 61_000,
 		onCancel() {},
 		onOpen() {},
