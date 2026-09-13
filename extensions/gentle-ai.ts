@@ -35,6 +35,15 @@ import type {
 import { Key, isKeyRelease, matchesKey, truncateToWidth, type KeybindingsManager, type TuiMouseEvent, type TuiMouseEventResult } from "@earendil-works/pi-tui";
 import { resolveGentlePiAgentHome } from "../lib/agent-home.ts";
 import {
+	clearRddStatusMemoForTesting as clearSharedRddStatusMemoForTesting,
+	invalidateRddModeStatus,
+	isValidRddModeStatus as isSharedValidRddModeStatus,
+	RDD_MODE_STATUS_CHANGED,
+	RDD_STATUS_MEMO_TTL_MS as SHARED_RDD_STATUS_MEMO_TTL_MS,
+	RDD_STATUS_TIMEOUT_MS as SHARED_RDD_STATUS_TIMEOUT_MS,
+	resolveRddModeStatus as resolveSharedRddModeStatus,
+} from "../lib/rdd-mode-status.ts";
+import {
 	ensureSddPreflight,
 	getSddPreflightPreferences,
 	installPackageAssets,
@@ -962,10 +971,7 @@ function renderBackgroundSubagentsStatusLine(
 function isValidRddModeStatus(
 	status: NativeReviewModeStatus | undefined,
 ): status is NativeReviewModeStatus {
-	if (status === undefined || status === null || typeof status !== "object") return false;
-	if (status.effective !== "on" && status.effective !== "off") return false;
-	const validSources: readonly string[] = Object.values(NATIVE_REVIEW_MODE_SOURCE);
-	return typeof status.source === "string" && validSources.includes(status.source);
+	return isSharedValidRddModeStatus(status);
 }
 
 /**
@@ -993,18 +999,18 @@ function renderRddStatusLine(
 // races the call against that same signal itself (not just the CLI's own
 // signal handling) so an abort is honored even against a stub/mock
 // reviewMode that ignores its `signal` argument, as tests do.
-const RDD_STATUS_TIMEOUT_MS = 3000;
+const RDD_STATUS_TIMEOUT_MS = SHARED_RDD_STATUS_TIMEOUT_MS;
 // Repeated session/agent-start builds within this window reuse the last
 // resolved status instead of respawning the native binary. Deliberately
 // memoizes a failed/undefined resolution too (a sustained outage should not
 // retry every agent start), trading a slower recovery signal for far fewer
 // spawns; the one-shot notify below still surfaces a sustained outage.
-const RDD_STATUS_MEMO_TTL_MS = 30_000;
+const RDD_STATUS_MEMO_TTL_MS = SHARED_RDD_STATUS_MEMO_TTL_MS;
 const rddStatusMemo = new Map<string, { readonly status: NativeReviewModeStatus | undefined; readonly expiresAt: number }>();
 
 /** @internal test seam: clears the per-cwd RDD status memo. */
 function clearRddStatusMemoForTesting(): void {
-	rddStatusMemo.clear();
+	clearSharedRddStatusMemoForTesting();
 }
 
 // gentle-pi#668 (corrected): last-known outcome for ONE candidate, keyed by
@@ -1182,11 +1188,7 @@ async function resolveRddModeStatus(
 	now: () => number = Date.now,
 	ctx?: Pick<ExtensionContext, "hasUI" | "ui">,
 ): Promise<NativeReviewModeStatus | undefined> {
-	const nowMs = now();
-	const cached = rddStatusMemo.get(cwd);
-	if (cached !== undefined && cached.expiresAt > nowMs) return cached.status;
-	const status = await readRddModeStatusOnce(nativeReviewCli, cwd, signal);
-	rddStatusMemo.set(cwd, { status, expiresAt: nowMs + RDD_STATUS_MEMO_TTL_MS });
+	const status = await resolveSharedRddModeStatus(nativeReviewCli, cwd, signal, now);
 	if (status === undefined && !rddStatusUnavailableWarned) {
 		rddStatusUnavailableWarned = true;
 		if (ctx?.hasUI) {
@@ -8916,6 +8918,10 @@ function createGentleAiExtensionForTesting(
 						pendingReviewConsentRegistry,
 						pendingReviewConsentSessionKey(ctx, pendingReviewConsentFallbackKey),
 					);
+				}
+				if (subAction !== NATIVE_REVIEW_MODE_OPERATION.STATUS) {
+					invalidateRddModeStatus(ctx.cwd);
+					pi.events.emit(RDD_MODE_STATUS_CHANGED, { cwd: ctx.cwd });
 				}
 				const report = `receipt-driven development: ${result.status.effective} (decided by ${result.status.source})`;
 				// A mutating sub-action that left the effective mode unchanged did
