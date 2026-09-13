@@ -24,21 +24,80 @@ function rail(f: ReturnType<typeof fixture>): ScrollView {
 	return node.entries[1].component;
 }
 
-test("grouped Status preserves structured fields and opaque integration text", () => {
-	const lines = renderShellSidebarBar({
-		cwd: "/project", branch: "main", dirty: 2, sessionName: "session",
-		modelId: "model", effort: "high", contextPercent: 45, contextWindow: 1000,
-		costTotal: 1, subscription: false, statuses: ["opaque integration"],
-	}, theme, 46);
+const statusModel = {
+	cwd: "/workspace/プロジェクト/", branch: "feature/compact-status-sidebar", dirty: 2, sessionName: "session",
+	modelId: "model", effort: "high", contextPercent: 45, contextWindow: 272_000,
+	costTotal: 14.35, subscription: true,
+	usage: { provider: "openai-codex", plan: undefined, fetchedAt: 0, limits: [{ name: "codex", limitReached: false, windows: [{ label: "week", usedPercent: 29, windowSeconds: 604_800, resetAt: null }] }] },
+	statuses: ["opaque\u001b[31m integration\nstate"],
+};
+
+test("compact Status sidebar renders branch, dirty count, Model, and usage in their compact forms", () => {
+	const lines = renderShellSidebarBar(statusModel, theme, 50);
 	const text = lines.join("\n");
-	let previous = -1;
-	for (const heading of ["Status", "Project", "Model", "Context", "Usage", "Integrations"]) {
-		const index = text.indexOf(heading);
-		assert.ok(index > previous, heading);
-		previous = index;
-	}
-	assert.match(text, /opaque integration/);
-	assert.match(text, /Branch.*main/);
+	assert.doesNotMatch(text, /Project/);
+	assert.match(text, /プロジェクト/);
+	assert.doesNotMatch(text, /workspace/);
+	assert.match(text, / feature\/compact-status-sidebar \+2/);
+	assert.doesNotMatch(text, /↳/);
+	assert.match(text, /Session session/);
+	assert.match(text, /Model: model - High/);
+	assert.ok(lines.some((line) => line.includes("Context") && line.includes("Usage")), "normal widths pair Context and Usage headings");
+	assert.match(text, /45%/);
+	assert.match(text, /272k tokens/);
+	assert.match(text, /\$14\.35 sub/);
+	assert.match(text, /week .*29%/);
+	assert.doesNotMatch(text, /codex week/);
+	assert.match(text, /opaque integration state/);
+	assert.doesNotMatch(text, /\u001b\[/, "external integration escapes are sanitized");
+	for (const line of lines) assert.ok(visibleWidth(line) <= 50);
+});
+
+test("compact Status sidebar keeps dirty visible without a branch and omits missing optional values", () => {
+	const lines = renderShellSidebarBar({ ...statusModel, branch: null, effort: undefined, sessionName: undefined, usage: undefined, statuses: [] }, theme, 37);
+	const text = lines.join("\n");
+	assert.doesNotMatch(text, /|Session|Integrations|week|codex|Effort/);
+	assert.match(text, /\+2/);
+	assert.match(text, /Model: model/);
+	assert.doesNotMatch(text, /Model: model -/);
+	assert.ok(!lines.some((line) => line.includes("Context") && line.includes("Usage")));
+	assert.ok(text.indexOf("Context") < text.indexOf("Usage"));
+	for (const line of lines) assert.ok(visibleWidth(line) <= 37);
+});
+
+test("compact Status sidebar wraps long branch and ANSI Unicode model values without overflow", () => {
+	const ansiTheme = { fg: (_color: string, text: string) => `\u001b[35m${text}\u001b[0m`, bold: (text: string) => `\u001b[1m${text}\u001b[0m` };
+	const lines = renderShellSidebarBar({
+		...statusModel,
+		cwd: "/workspace/emoji-🧪-e\u0301", branch: "very-long-branch-name-with-unicode-界界界", sessionName: "very-long-session-name",
+		modelId: "very-long-model-name-with-界界界", statuses: ["very-long opaque integration status with 🧪 and e\u0301"],
+	}, ansiTheme, 34);
+	const text = lines.join("\n");
+	assert.match(text, //);
+	assert.match(text, /\+2/);
+	assert.match(text, /Model:/);
+	assert.ok(lines.some((line) => line.includes("emoji-🧪-e\u0301")));
+	for (const line of lines) assert.ok(visibleWidth(line) <= 34);
+});
+
+test("compact sidebar usage is derived from dynamic structured windows while the bottom bar keeps its provider", async () => {
+	const model = { ...statusModel, usage: { ...statusModel.usage, limits: [{ ...statusModel.usage.limits[0], windows: [
+		{ ...statusModel.usage.limits[0].windows[0], label: "week", usedPercent: 71 },
+		{ ...statusModel.usage.limits[0].windows[0], label: "24h", usedPercent: 38 },
+	] }] } };
+	const sidebar = renderShellSidebarBar(model, theme, 50).join("\n");
+	assert.match(sidebar, /week .*71%/);
+	assert.match(sidebar, /71% ·/);
+	assert.match(sidebar, /24h 38%/);
+	assert.doesNotMatch(sidebar, /codex/);
+	const { renderShellBar } = await import("../lib/shell-bar.ts");
+	assert.match(renderShellBar(model, theme, 200).join("\n"), /codex week/);
+});
+
+test("compact Status sidebar keeps responsive Context and Usage columns at the legibility boundary", () => {
+	const wide = renderShellSidebarBar(statusModel, theme, 38);
+	assert.ok(wide.some((line) => line.includes("Context") && line.includes("Usage")));
+	for (const line of wide) assert.ok(visibleWidth(line) <= 38);
 });
 
 test("scrollable TODO keeps every task while bottom and collapsed cards stay bounded", () => {
