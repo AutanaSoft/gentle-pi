@@ -299,7 +299,7 @@ export function renderShellSidebarBar(model: ShellBarModel, theme: ShellBarTheme
 	const body = [
 		...project.flatMap((line) => wrapTextWithAnsi(line, innerWidth)),
 		"",
-		...columnGroups(reviewGroup, modelGroup, label, innerWidth),
+		...columnGroups(modelGroup, reviewGroup, label, innerWidth),
 		"",
 		...columnGroups(contextGroup, usageGroup, label, innerWidth),
 		...(integrations ? ["", ...wrappedGroup(integrations, label, innerWidth)] : []),
