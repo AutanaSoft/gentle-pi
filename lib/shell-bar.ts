@@ -54,6 +54,11 @@ export const SHELL_BAR_SEPARATOR = "⟡";
 export const SHELL_BAR_GAUGE_CELLS = GAUGE_CELLS;
 const RIGHT_PADDING = 2;
 const COMPACT_BRANCH_WIDTH = 15;
+const COLUMN_GAP = 3;
+const CONTEXT_COLUMN_MIN_WIDTH = 15;
+const USAGE_COLUMN_MIN_WIDTH = 16;
+
+type SidebarGroup = { title: string; lines: string[] };
 
 export function shellEnabled(env: NodeJS.ProcessEnv = process.env): boolean {
 	if (env.GENTLE_PI_AGENTS_CHILD === "1") return false;
@@ -96,6 +101,10 @@ interface ShellBarFields {
 	usage?: [full: string, compact: string, percentOnly: string];
 	statuses: string[];
 	session?: string;
+}
+
+function projectName(cwd: string): string {
+	return cwd.split("/").filter((part) => part.length > 0).pop() ?? cwd;
 }
 
 function clipText(text: string, max: number): string {
@@ -211,57 +220,90 @@ function semanticLine(entries: SemanticEntry[], theme: ShellBarTheme, width: num
 	return [hasRuntime ? theme.fg(ROLE.STATUS, "r!") : "", hasIntegrations ? theme.fg(ROLE.STATUS, "i!") : ""].filter(Boolean).join(" ");
 }
 
+function padToWidth(text: string, width: number): string {
+	return text + " ".repeat(Math.max(0, width - visibleWidth(text)));
+}
+
+function wrappedGroup(group: SidebarGroup, label: (text: string) => string, innerWidth: number): string[] {
+	const inset = Math.min(1, innerWidth - 1);
+	return [
+		label(group.title),
+		...group.lines.flatMap((line) => wrapTextWithAnsi(line, innerWidth - inset).map((part) => " ".repeat(inset) + part)),
+	];
+}
+
+function columnGroups(left: SidebarGroup, right: SidebarGroup, label: (text: string) => string, innerWidth: number): string[] {
+	if (innerWidth < CONTEXT_COLUMN_MIN_WIDTH + COLUMN_GAP + USAGE_COLUMN_MIN_WIDTH) {
+		return [...wrappedGroup(left, label, innerWidth), "", ...wrappedGroup(right, label, innerWidth)];
+	}
+	const available = innerWidth - COLUMN_GAP;
+	const leftWidth = Math.floor(available / 2);
+	const rightWidth = available - leftWidth;
+	const leftLines = [label(left.title), ...left.lines.flatMap((line) => wrapTextWithAnsi(line, leftWidth))];
+	const rightLines = [label(right.title), ...right.lines.flatMap((line) => wrapTextWithAnsi(line, rightWidth))];
+	return Array.from({ length: Math.max(leftLines.length, rightLines.length) }, (_, index) =>
+		`${padToWidth(leftLines[index] ?? "", leftWidth)}${" ".repeat(COLUMN_GAP)}${rightLines[index] ?? ""}`,
+	);
+}
+
+function renderSidebarUsage(usage: ProviderUsage, theme: ShellBarTheme): string | undefined {
+	const [first, ...rest] = usage.limits[0]?.windows ?? [];
+	if (!first) return undefined;
+	const head = `${theme.fg(ROLE.LABEL, first.label)} ${paintGauge(first.usedPercent, theme)} ${theme.fg(ROLE.VALUE, `${Math.round(first.usedPercent)}%`)}`;
+	const tail = rest.map((window) => `${theme.fg(ROLE.SEPARATOR, "·")} ${theme.fg(ROLE.LABEL, window.label)} ${theme.fg(ROLE.VALUE, `${Math.round(window.usedPercent)}%`)}`);
+	return [head, ...tail].join(" ");
+}
+
+function capitalize(text: string): string {
+	return text[0]?.toUpperCase() + text.slice(1);
+}
+
 // Sidebar groups use structured fields, never positional compact-bar segments
 // or inferred meanings from opaque extension status strings.
 export function renderShellSidebarBar(model: ShellBarModel, theme: ShellBarTheme, width: number): string[] {
 	const value = (text: string) => theme.fg(ROLE.VALUE, theme.bold(text));
 	const label = (text: string) => theme.fg(ROLE.LABEL, text);
-	const dirty = model.dirty ? theme.fg(ROLE.DIRTY, `±${model.dirty}`) : "";
-	const cwd = sanitizeBarText(model.cwd);
+	const cwd = projectName(sanitizeBarText(model.cwd));
 	const branchName = model.branch ? sanitizeBarText(model.branch) : "";
 	const modelId = sanitizeBarText(model.modelId);
-	const effort = model.effort ? sanitizeBarText(model.effort) : "";
+	const effort = model.effort ? capitalize(sanitizeBarText(model.effort)) : "";
 	const sessionName = model.sessionName ? sanitizeBarText(model.sessionName) : "";
-	const branch = branchName ? `${label("Branch")} ${value(branchName)}` : "";
 	const percent = model.contextPercent === null ? "?%" : `${Math.round(model.contextPercent)}%`;
-	const capacity = label(`${formatTokens(model.contextWindow)} tokens`);
-	const usage = model.usage ? renderUsageBar(model.usage, theme) : undefined;
-	const groups: Array<{ title: string; lines: string[] }> = [
-		{
-			title: "Project",
-			lines: [
-				value(cwd),
-				...((branch || dirty) ? [[branch, dirty].filter(Boolean).join(" ")] : []),
-				...(sessionName ? [`${label("Session")} ${value(sessionName)}`] : []),
-			],
-		},
-		{
-			title: "Review",
-			lines: [value(rddModeToken(model.rddMode))],
-		},
-		{
-			title: "Model",
-			lines: [value(modelId), ...(effort ? [`${label("Effort")} ${theme.fg(ROLE.EFFORT, effort)}`] : [])],
-		},
-		{
-			title: "Context",
-			lines: [`${paintGauge(model.contextPercent, theme)} ${value(percent)}  ${capacity}`],
-		},
-		{
-			title: "Usage",
-			lines: [`${label("Cost")} ${value(formatCost(model.costTotal, model.subscription))}`, ...(usage ? [usage] : [])],
-		},
-		...(model.statuses.length ? [{ title: "Integrations", lines: model.statuses.map(sanitizeBarText).filter(Boolean).map((status) => theme.fg(ROLE.STATUS, status)) }] : []),
+	const usage = model.usage ? renderSidebarUsage(model.usage, theme) : undefined;
+	const branchStatus = [
+		...(branchName ? [`${theme.fg(ROLE.BRANCH, "")} ${value(branchName)}`] : []),
+		...(model.dirty ? [theme.fg(ROLE.DIRTY, `+${model.dirty}`)] : []),
+	].join(" ");
+	const project = [
+		value(cwd),
+		...(branchStatus ? [branchStatus] : []),
+		...(sessionName ? [`${label("Session")} ${value(sessionName)}`] : []),
 	];
-	// Pre-wrap values before indenting so Unicode/ANSI continuation lines keep
-	// the same inset without consuming the card's right border.
+	const reviewGroup: SidebarGroup = { title: "Review", lines: [value(rddModeToken(model.rddMode))] };
+	const modelGroup: SidebarGroup = {
+		title: "Model",
+		lines: [`${value(modelId)}${effort ? ` ${label("·")} ${theme.fg(ROLE.EFFORT, effort)}` : ""}`],
+	};
+	const contextGroup: SidebarGroup = {
+		title: "Context",
+		lines: [`${paintGauge(model.contextPercent, theme)} ${value(percent)}`, label(`${formatTokens(model.contextWindow)} tokens`)],
+	};
+	const usageGroup: SidebarGroup = {
+		title: "Usage",
+		lines: [`${label("Cost")} ${value(formatCost(model.costTotal, model.subscription))}`, ...(usage ? [usage] : [])],
+	};
+	const integrations: SidebarGroup | undefined = model.statuses.length
+		? { title: "Integrations", lines: model.statuses.map(sanitizeBarText).filter(Boolean).map((status) => theme.fg(ROLE.STATUS, status)) }
+		: undefined;
 	const innerWidth = cardInnerWidth(width);
-	const inset = Math.min(1, innerWidth - 1);
-	const body = groups.flatMap((group, index) => [
-		...(index ? [""] : []),
-		label(group.title),
-		...group.lines.flatMap((line) => wrapTextWithAnsi(line, innerWidth - inset).map((part) => " ".repeat(inset) + part)),
-	]);
+	const body = [
+		...project.flatMap((line) => wrapTextWithAnsi(line, innerWidth)),
+		"",
+		...columnGroups(reviewGroup, modelGroup, label, innerWidth),
+		"",
+		...columnGroups(contextGroup, usageGroup, label, innerWidth),
+		...(integrations ? ["", ...wrappedGroup(integrations, label, innerWidth)] : []),
+	];
 	return renderCard({ title: "Status", body, tone: CARD_TONE.INFO }, theme, width, { expanded: true });
 }
 
