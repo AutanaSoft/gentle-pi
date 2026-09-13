@@ -47,7 +47,9 @@ test("compact Status sidebar preserves structured RDD, compact project fields, a
 		assert.match(text, /Session session/);
 		assert.match(text, /Model/);
 		assert.match(text, /model · High/);
-		assert.ok(lines.some((line) => line.includes("Review") && line.includes("Model")), "wide sidebar pairs Review and Model");
+		const modelReviewLine = lines.find((line) => line.includes("Model") && line.includes("Review"));
+		assert.ok(modelReviewLine, "wide sidebar pairs Model and Review");
+		assert.ok(modelReviewLine.indexOf("Model") < modelReviewLine.indexOf("Review"));
 		assert.ok(lines.some((line) => line.includes("Context") && line.includes("Usage")), "wide sidebar pairs Context and Usage");
 		assert.match(text, /272k tokens/);
 		assert.match(text, /week .*29%/);
@@ -59,13 +61,13 @@ test("compact Status sidebar preserves structured RDD, compact project fields, a
 	}
 });
 
-test("compact Status sidebar stacks Review then Model and Context then Usage when narrow", () => {
+test("compact Status sidebar stacks Model then Review and Context then Usage when narrow", () => {
 	const lines = renderShellSidebarBar({ ...statusModel, branch: null, effort: undefined, sessionName: undefined, usage: undefined, statuses: [] }, theme, 34);
 	const text = lines.join("\n");
 	assert.match(text, /\+2/);
 	assert.doesNotMatch(text, /|Session|Integrations|week|codex/);
 	assert.ok(!lines.some((line) => line.includes("Review") && line.includes("Model")));
-	assert.ok(text.indexOf("Review") < text.indexOf("Model"));
+	assert.ok(text.indexOf("Model") < text.indexOf("Review"));
 	assert.ok(!lines.some((line) => line.includes("Context") && line.includes("Usage")));
 	assert.ok(text.indexOf("Context") < text.indexOf("Usage"));
 	for (const line of lines) assert.ok(visibleWidth(line) <= 34);
