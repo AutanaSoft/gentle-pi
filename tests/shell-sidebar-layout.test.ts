@@ -4,7 +4,7 @@ import { ScrollView, visibleWidth, type TUI, type TuiMouseEvent } from "@earendi
 import { renderLayoutFrame } from "@earendil-works/pi-tui/dist/layout.js";
 import { installSidebar, invalidateSidebar } from "../lib/shell-sidebar-layout.ts";
 import { sidebarPart, sidebarState } from "../lib/shell-sidebar.ts";
-import { renderShellSidebarBar } from "../lib/shell-bar.ts";
+import { renderShellBar, renderShellSidebarBar } from "../lib/shell-bar.ts";
 import { renderTodoCard, type TodoState } from "../lib/shell-todo.ts";
 
 const NODE = Symbol.for("@earendil-works/pi-tui/layout-node");
@@ -24,22 +24,67 @@ function rail(f: ReturnType<typeof fixture>): ScrollView {
 	return node.entries[1].component;
 }
 
-test("grouped Status preserves structured fields and opaque integration text", () => {
-	const lines = renderShellSidebarBar({
-		cwd: "/project", branch: "main", dirty: 2, sessionName: "session",
-		modelId: "model", effort: "high", contextPercent: 45, contextWindow: 1000,
-		costTotal: 1, subscription: false, rddMode: "on", statuses: ["opaque integration"],
-	}, theme, 46);
-	const text = lines.join("\n");
-	let previous = -1;
-	for (const heading of ["Status", "Project", "Review", "Model", "Context", "Usage", "Integrations"]) {
-		const index = text.indexOf(heading);
-		assert.ok(index > previous, heading);
-		previous = index;
+const statusModel = {
+	cwd: "/workspace/プロジェクト/", branch: "feature/compact-status-sidebar", dirty: 2, sessionName: "session",
+	modelId: "model", effort: "high", contextPercent: 45, contextWindow: 272_000,
+	costTotal: 14.35, subscription: true, rddMode: "on" as const,
+	usage: { provider: "openai-codex", plan: undefined, fetchedAt: 0, limits: [{ name: "codex", limitReached: false, windows: [
+		{ label: "week", usedPercent: 29, windowSeconds: 604_800, resetAt: null },
+		{ label: "24h", usedPercent: 38, windowSeconds: 86_400, resetAt: null },
+	] }] },
+	statuses: ["opaque\u001b[31m integration\nstate"],
+};
+
+test("compact Status sidebar preserves structured RDD, compact project fields, and responsive columns", () => {
+	for (const [rddMode, token] of [["on", "RDD: ON"], ["off", "RDD: OFF"], ["unknown", "RDD: ?"]] as const) {
+		const lines = renderShellSidebarBar({ ...statusModel, rddMode }, theme, 50);
+		const text = lines.join("\n");
+		assert.match(text, new RegExp(token.replace("?", "\\?")));
+		assert.doesNotMatch(text, /Project/);
+		assert.match(text, /プロジェクト/);
+		assert.doesNotMatch(text, /workspace/);
+		assert.match(text, / feature\/compact-status-sidebar \+2/);
+		assert.match(text, /Session session/);
+		assert.match(text, /Model/);
+		assert.match(text, /model · High/);
+		assert.ok(lines.some((line) => line.includes("Review") && line.includes("Model")), "wide sidebar pairs Review and Model");
+		assert.ok(lines.some((line) => line.includes("Context") && line.includes("Usage")), "wide sidebar pairs Context and Usage");
+		assert.match(text, /272k tokens/);
+		assert.match(text, /week .*29%/);
+		assert.match(text, /24h 38%/);
+		assert.doesNotMatch(text, /codex/);
+		assert.match(text, /opaque integration state/);
+		assert.doesNotMatch(text, /\u001b\[/, "external integration escapes are sanitized");
+		for (const line of lines) assert.ok(visibleWidth(line) <= 50);
 	}
-	assert.match(text, /RDD: ON/);
-	assert.match(text, /opaque integration/);
-	assert.match(text, /Branch.*main/);
+});
+
+test("compact Status sidebar stacks Review then Model and Context then Usage when narrow", () => {
+	const lines = renderShellSidebarBar({ ...statusModel, branch: null, effort: undefined, sessionName: undefined, usage: undefined, statuses: [] }, theme, 34);
+	const text = lines.join("\n");
+	assert.match(text, /\+2/);
+	assert.doesNotMatch(text, /|Session|Integrations|week|codex/);
+	assert.ok(!lines.some((line) => line.includes("Review") && line.includes("Model")));
+	assert.ok(text.indexOf("Review") < text.indexOf("Model"));
+	assert.ok(!lines.some((line) => line.includes("Context") && line.includes("Usage")));
+	assert.ok(text.indexOf("Context") < text.indexOf("Usage"));
+	for (const line of lines) assert.ok(visibleWidth(line) <= 34);
+});
+
+test("compact Status sidebar wraps ANSI and Unicode safely while the bottom bar preserves RDD and provider", () => {
+	const ansiTheme = { fg: (_color: string, text: string) => `\u001b[35m${text}\u001b[0m`, bold: (text: string) => `\u001b[1m${text}\u001b[0m` };
+	const model = {
+		...statusModel,
+		cwd: "/workspace/emoji-🧪-e\u0301", branch: "very-long-branch-name-with-unicode-界界界", sessionName: "very-long-session-name",
+		modelId: "very-long-model-name-with-界界界", statuses: ["very-long opaque integration status with 🧪 and e\u0301"],
+	};
+	const lines = renderShellSidebarBar(model, ansiTheme, 34);
+	assert.match(lines.join("\n"), //);
+	assert.match(lines.join("\n"), /\+2/);
+	for (const line of lines) assert.ok(visibleWidth(line) <= 34);
+	const bottom = renderShellBar(model, theme, 200).join("\n");
+	assert.match(bottom, /RDD: ON/);
+	assert.match(bottom, /codex week/);
 });
 
 test("scrollable TODO keeps every task while bottom and collapsed cards stay bounded", () => {
