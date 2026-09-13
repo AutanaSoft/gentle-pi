@@ -2,6 +2,12 @@ import assert from "node:assert/strict";
 import test from "node:test";
 import { __testing } from "../extensions/gentle-ai.ts";
 import {
+	projectRddMode,
+	resolveRddModeStatus as resolveSharedRddModeStatus,
+	invalidateRddModeStatus,
+	RDD_MODE_STATUS_CHANGED,
+} from "../lib/rdd-mode-status.ts";
+import {
 	NATIVE_REVIEW_MODE_OPERATION,
 	NATIVE_REVIEW_MODE_SOURCE,
 	type NativeReviewCli,
@@ -78,6 +84,49 @@ function countingReviewMode(result: NativeReviewModeResult): { cli: Pick<NativeR
 		calls: () => calls,
 	};
 }
+
+test("shared RDD mode projection is authoritative and fail-closed", () => {
+	assert.equal(projectRddMode(modeResult("on", NATIVE_REVIEW_MODE_SOURCE.GLOBAL).status), "on");
+	assert.equal(projectRddMode(modeResult("off", NATIVE_REVIEW_MODE_SOURCE.DEFAULT).status), "off");
+	assert.equal(projectRddMode({ effective: "invalid", source: "global" } as unknown as NativeReviewModeStatus), "unknown");
+	assert.equal(RDD_MODE_STATUS_CHANGED, "gentle-pi:rdd-mode-status-changed");
+});
+
+test("shared resolver caches per cwd, invalidates, and only invokes status", async () => {
+	invalidateRddModeStatus();
+	const operations: string[] = [];
+	const cli = { reviewMode: async (request: NativeReviewModeRequest) => {
+		operations.push(request.operation);
+		return modeResult("on", NATIVE_REVIEW_MODE_SOURCE.GLOBAL);
+	} };
+	assert.equal((await resolveSharedRddModeStatus(cli, "/shared-a"))?.effective, "on");
+	assert.equal((await resolveSharedRddModeStatus(cli, "/shared-a"))?.effective, "on");
+	assert.equal((await resolveSharedRddModeStatus(cli, "/shared-b"))?.effective, "on");
+	invalidateRddModeStatus("/shared-a");
+	await resolveSharedRddModeStatus(cli, "/shared-a");
+	assert.deepEqual(operations, ["status", "status", "status"]);
+});
+
+test("shared resolver cannot let an invalidated older read overwrite a newer same-cwd observation", async () => {
+	invalidateRddModeStatus();
+	let calls = 0;
+	let resolveFirst!: (result: NativeReviewModeResult) => void;
+	let resolveSecond!: (result: NativeReviewModeResult) => void;
+	const cli = { reviewMode: () => new Promise<NativeReviewModeResult>((resolve) => {
+		calls += 1;
+		if (calls === 1) resolveFirst = resolve;
+		else resolveSecond = resolve;
+	}) };
+	const first = resolveSharedRddModeStatus(cli, "/shared-race");
+	invalidateRddModeStatus("/shared-race");
+	const second = resolveSharedRddModeStatus(cli, "/shared-race");
+	resolveSecond(modeResult("off", NATIVE_REVIEW_MODE_SOURCE.DEFAULT));
+	assert.equal((await second)?.effective, "off");
+	resolveFirst(modeResult("on", NATIVE_REVIEW_MODE_SOURCE.GLOBAL));
+	assert.equal((await first)?.effective, "on");
+	assert.equal((await resolveSharedRddModeStatus(cli, "/shared-race"))?.effective, "off");
+	assert.equal(calls, 2, "the stale completion must not replace the post-invalidation cache entry");
+});
 
 test("renderRddStatusLine renders the fail-closed unknown line for an unresolved status", () => {
 	assert.equal(

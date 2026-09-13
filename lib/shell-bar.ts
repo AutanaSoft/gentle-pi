@@ -1,6 +1,7 @@
 import { truncateToWidth, visibleWidth, wrapTextWithAnsi } from "@earendil-works/pi-tui";
 import { GAUGE_CELLS, gaugeTone, paintGauge, renderGauge, type GaugeTone } from "./shell-gauge.ts";
 import { renderUsageBar, type ProviderUsage } from "./shell-usage.ts";
+import type { RddModeValue } from "./rdd-mode-status.ts";
 import { sanitizeTerminalText } from "./terminal-theme.ts";
 import { CARD_TONE, cardInnerWidth, renderCard } from "./shell-card.ts";
 
@@ -23,6 +24,7 @@ export interface ShellBarModel {
 	subscription: boolean;
 	usage: ProviderUsage | undefined;
 	statuses: string[];
+	rddMode?: RddModeValue;
 }
 
 export interface ShellBarTheme {
@@ -43,6 +45,7 @@ const ROLE = {
 	LABEL: "muted",
 	VALUE: "text",
 	STATUS: "muted",
+	RDD: "syntaxFunction",
 	SESSION: "dim",
 } as const;
 
@@ -77,6 +80,10 @@ function sanitizeStatus(text: string): string {
 	return sanitizeTerminalText(text.replace(/[\r\n\t]/g, " ")).replace(/ +/g, " ").trim();
 }
 
+export function rddModeToken(mode: RddModeValue | undefined): string {
+	return `RDD: ${mode === "on" ? "ON" : mode === "off" ? "OFF" : "?"}`;
+}
+
 function buildSegments(model: ShellBarModel, theme: ShellBarTheme): string[] {
 	const dirty = model.dirty ? ` ${theme.fg(ROLE.DIRTY, `±${model.dirty}`)}` : "";
 	const location = model.branch
@@ -90,7 +97,8 @@ function buildSegments(model: ShellBarModel, theme: ShellBarTheme): string[] {
 	const cost = theme.fg(ROLE.VALUE, formatCost(model.costTotal, model.subscription));
 	const usage = model.usage ? renderUsageBar(model.usage, theme) : undefined;
 	const statuses = model.statuses.map((status) => theme.fg(ROLE.STATUS, sanitizeStatus(status)));
-	return [theme.fg(ROLE.BRAND, SHELL_BAR_BRAND), location, modelSegment, context, cost, ...(usage ? [usage] : []), ...statuses];
+	const rdd = theme.fg(ROLE.RDD, rddModeToken(model.rddMode));
+	return [theme.fg(ROLE.BRAND, SHELL_BAR_BRAND), rdd, location, modelSegment, context, cost, ...(usage ? [usage] : []), ...statuses];
 }
 
 // When the line overflows, the location gives way first: the path shrinks to
@@ -135,6 +143,10 @@ export function renderShellSidebarBar(model: ShellBarModel, theme: ShellBarTheme
 				...((branch || dirty) ? [[branch, dirty].filter(Boolean).join(" ")] : []),
 				...(model.sessionName ? [`${label("Session")} ${value(model.sessionName)}`] : []),
 			],
+		},
+		{
+			title: "Review",
+			lines: [value(rddModeToken(model.rddMode))],
 		},
 		{
 			title: "Model",
