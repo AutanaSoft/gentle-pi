@@ -176,6 +176,7 @@ interface ParityRuntime {
 	controller: RegisteredControllerTool;
 	commands: Map<string, RegisteredCommand>;
 	events: Map<string, RegisteredEvent>;
+	emitted: Array<{ name: string; data: unknown }>;
 }
 
 interface ParityRuntimeOptions {
@@ -189,6 +190,7 @@ function parityRuntime(nativeReviewCli: NativeReviewCli | null, options: ParityR
 	const tools = new Map<string, RegisteredControllerTool>();
 	const commands = new Map<string, RegisteredCommand>();
 	const events = new Map<string, RegisteredEvent>();
+	const emitted: Array<{ name: string; data: unknown }> = [];
 	const dependencies = {
 		nativeReviewCli,
 		candidateViews: options.candidateViews ?? new CandidateViewRegistry(),
@@ -200,10 +202,11 @@ function parityRuntime(nativeReviewCli: NativeReviewCli | null, options: ParityR
 		on(name: string, handler: RegisteredEvent) { events.set(name, handler); },
 		registerTool(definition: RegisteredControllerTool & { name: string }) { tools.set(definition.name, definition); },
 		registerCommand(name: string, definition: RegisteredCommand) { commands.set(name, definition); },
+		events: { emit(name: string, data: unknown) { emitted.push({ name, data }); } },
 	} as unknown as ExtensionAPI);
 	const controller = tools.get("gentle_review");
 	assert.ok(controller);
-	return { controller: controller!, commands, events };
+	return { controller: controller!, commands, events, emitted };
 }
 
 function repository(t: test.TestContext): string {
@@ -388,6 +391,10 @@ test("public gentle:review-mode handler reports current operations, global-off w
 	await command!.handler("disable", ctx);
 	await command!.handler("enable", ctx);
 	assert.deepEqual(calls, ["status", "disable", "enable"]);
+	assert.deepEqual(runtime.emitted, [
+		{ name: "gentle-pi:rdd-mode-status-changed", data: { cwd: process.cwd() } },
+		{ name: "gentle-pi:rdd-mode-status-changed", data: { cwd: process.cwd() } },
+	]);
 	assert.match(notices[0]?.message ?? "", /receipt-driven development: on/);
 	assert.match(notices[1]?.message ?? "", /receipt-driven development: off/);
 	assert.equal(notices[2]?.type, "warning");

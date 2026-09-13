@@ -1,6 +1,7 @@
 import { truncateToWidth, visibleWidth, wrapTextWithAnsi } from "@earendil-works/pi-tui";
 import { GAUGE_CELLS, gaugeTone, paintGauge, renderGauge, type GaugeTone } from "./shell-gauge.ts";
 import { renderUsageBar, type ProviderUsage } from "./shell-usage.ts";
+import type { RddModeValue } from "./rdd-mode-status.ts";
 import { sanitizeTerminalText } from "./terminal-theme.ts";
 import { CARD_TONE, cardInnerWidth, renderCard } from "./shell-card.ts";
 
@@ -23,6 +24,7 @@ export interface ShellBarModel {
 	subscription: boolean;
 	usage: ProviderUsage | undefined;
 	statuses: string[];
+	rddMode?: RddModeValue;
 }
 
 export interface ShellBarTheme {
@@ -43,6 +45,7 @@ const ROLE = {
 	LABEL: "muted",
 	VALUE: "text",
 	STATUS: "muted",
+	RDD: "syntaxFunction",
 	SESSION: "dim",
 } as const;
 
@@ -77,8 +80,13 @@ function sanitizeBarText(text: string): string {
 	return sanitizeTerminalText(text.replace(/[\r\n\t]/g, " ")).replace(/ +/g, " ").trim();
 }
 
+export function rddModeToken(mode: RddModeValue | undefined): string {
+	return `RDD: ${mode === "on" ? "ON" : mode === "off" ? "OFF" : "?"}`;
+}
+
 interface ShellBarFields {
 	brand: string;
+	rdd: string;
 	project: string;
 	compactProject: string;
 	model: string;
@@ -124,6 +132,7 @@ function buildFields(model: ShellBarModel, theme: ShellBarTheme): ShellBarFields
 		: undefined;
 	return {
 		brand: theme.fg(ROLE.BRAND, SHELL_BAR_BRAND),
+		rdd: theme.fg(ROLE.RDD, rddModeToken(model.rddMode)),
 		project: project(cwd, projectBranch),
 		compactProject: project(cwd, branch),
 		model: effort ? `${theme.fg(ROLE.MODEL, modelId)} ${theme.fg(ROLE.LABEL, "·")} ${theme.fg(ROLE.EFFORT, effort)}` : theme.fg(ROLE.MODEL, modelId),
@@ -141,12 +150,17 @@ function fitLine(line: string, width: number): string {
 }
 
 function projectLine(fields: ShellBarFields, theme: ShellBarTheme, width: number): string {
-	const left = [fields.project, fields.compactProject].find((candidate) => visibleWidth(joinSegments([fields.brand, candidate], theme)) <= width);
-	const identity = joinSegments([fields.brand, left ?? fields.compactProject], theme);
+	const identities = [
+		[fields.brand, fields.rdd, fields.project],
+		[fields.brand, fields.rdd, fields.compactProject],
+		[fields.brand, fields.project],
+		[fields.brand, fields.compactProject],
+	];
+	const identity = joinSegments(identities.find((candidate) => visibleWidth(joinSegments(candidate, theme)) <= width) ?? identities.at(-1)!, theme);
 	if (!fields.session || visibleWidth(identity) + RIGHT_PADDING >= width) return fitLine(identity, width);
 	const sessionWidth = width - visibleWidth(identity) - RIGHT_PADDING;
-	const session = fitLine(fields.session, sessionWidth);
-	return `${identity}${" ".repeat(Math.max(RIGHT_PADDING, width - visibleWidth(identity) - visibleWidth(session)))}${session}`;
+	if (visibleWidth(fields.session) > sessionWidth) return identity;
+	return `${identity}${" ".repeat(Math.max(RIGHT_PADDING, width - visibleWidth(identity) - visibleWidth(fields.session)))}${fields.session}`;
 }
 
 interface RuntimeLine {
@@ -222,6 +236,10 @@ export function renderShellSidebarBar(model: ShellBarModel, theme: ShellBarTheme
 			],
 		},
 		{
+			title: "Review",
+			lines: [value(rddModeToken(model.rddMode))],
+		},
+		{
 			title: "Model",
 			lines: [value(modelId), ...(effort ? [`${label("Effort")} ${theme.fg(ROLE.EFFORT, effort)}`] : [])],
 		},
@@ -254,7 +272,7 @@ export function renderShellBar(model: ShellBarModel, theme: ShellBarTheme, width
 		const status = fields.statuses.find((candidate) => visibleWidth(candidate) <= width);
 		return status ? [fitLine("!", width), fitLine("r!", width), status] : [fitLine("!", width), fitLine("r!", width)];
 	}
-	const complete = joinSegments([fields.brand, fields.project, fields.model, fields.context[0], fields.cost, fields.usage?.[0] ?? "", ...fields.statuses], theme);
+	const complete = joinSegments([fields.brand, fields.rdd, fields.project, fields.model, fields.context[0], fields.cost, fields.usage?.[0] ?? "", ...fields.statuses], theme);
 	if (visibleWidth(complete) + (fields.session ? RIGHT_PADDING + visibleWidth(fields.session) : 0) <= width) {
 		const padding = fields.session ? " ".repeat(width - visibleWidth(complete) - visibleWidth(fields.session)) : "";
 		return [complete + padding + (fields.session ?? "")];
