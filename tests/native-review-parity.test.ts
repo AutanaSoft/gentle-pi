@@ -395,7 +395,7 @@ test("public gentle:review-mode handler reports current operations, global-off w
 		{ name: "gentle-pi:rdd-mode-status-changed", data: { cwd: process.cwd() } },
 		{ name: "gentle-pi:rdd-mode-status-changed", data: { cwd: process.cwd() } },
 	]);
-	assert.match(notices[0]?.message ?? "", /Receipt-driven development: on \(scope: clone; decided by default\)/);
+	assert.match(notices[0]?.message ?? "", /Receipt-driven development: on \(scope: default; decided by default\)/);
 	assert.match(notices[1]?.message ?? "", /Receipt-driven development: off \(scope: clone; decided by clone_local\)/);
 	assert.equal(notices[2]?.type, "warning");
 	assert.match(notices[2]?.message ?? "", /gentle-ai review mode enable --scope=global/);

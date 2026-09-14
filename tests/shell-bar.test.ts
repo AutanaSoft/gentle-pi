@@ -87,7 +87,7 @@ test("renderShellBar renders RDD second and removes it before the brand at extre
 });
 
 test("renderShellSidebarBar hides scope while RDD status is unknown", () => {
-	const text = renderShellSidebarBar(model({ rddMode: "unknown", rddScope: "both" }), plainTheme, 46).join("\n");
+	const text = renderShellSidebarBar(model({ rddMode: "unknown", rddScope: "clone" }), plainTheme, 46).join("\n");
 	assert.match(text, /RDD: \?/);
 	assert.doesNotMatch(text, /Scope:/);
 });

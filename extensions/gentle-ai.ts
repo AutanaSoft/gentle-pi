@@ -38,6 +38,7 @@ import {
 	clearRddStatusMemoForTesting as clearSharedRddStatusMemoForTesting,
 	invalidateRddModeStatus,
 	isValidRddModeStatus as isSharedValidRddModeStatus,
+	projectRddScope,
 	RDD_MODE_STATUS_CHANGED,
 	RDD_STATUS_MEMO_TTL_MS as SHARED_RDD_STATUS_MEMO_TTL_MS,
 	RDD_STATUS_TIMEOUT_MS as SHARED_RDD_STATUS_TIMEOUT_MS,
@@ -987,8 +988,8 @@ function isValidRddModeStatus(
 function renderRddStatusLine(
 	status: NativeReviewModeStatus | RddModeStatus | undefined,
 ): string {
-	const scope = status != null && typeof status === "object" && "scope" in status ? status.scope : undefined;
-	return status != null && isValidRddModeStatus(status) && (scope === "global" || scope === "clone" || scope === "both")
+	const scope = projectRddScope(status);
+	return status != null && isValidRddModeStatus(status) && scope !== undefined
 		? `Receipt-driven development: ${status.effective} (scope: ${scope}; decided by ${status.source})`
 		: "Receipt-driven development: unknown (native status or scope unavailable)";
 }
@@ -8925,7 +8926,7 @@ function createGentleAiExtensionForTesting(
 					invalidateRddModeStatus(ctx.cwd);
 					pi.events.emit(RDD_MODE_STATUS_CHANGED, { cwd: ctx.cwd });
 				}
-				const report = renderRddStatusLine({ ...result.status, scope: result.scope });
+				const report = renderRddStatusLine(result.status);
 				// A mutating sub-action that left the effective mode unchanged did
 				// not do what the user asked, and reporting only the resulting
 				// status reads as if it had. This is reachable for exactly one

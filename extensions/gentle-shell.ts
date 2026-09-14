@@ -15,8 +15,8 @@ import { accountIdFromToken, CODEX_PROVIDER, CODEX_USAGE_URL, parseCodexUsage, p
 import { UsageView } from "../lib/shell-usage-view.ts";
 import { sidebarPart } from "../lib/shell-sidebar.ts";
 import { installSidebar, invalidateSidebar } from "../lib/shell-sidebar-layout.ts";
-import { createNativeReviewCli, type NativeReviewCli, type NativeReviewModeScope } from "../lib/native-review-cli.ts";
-import { invalidateRddModeStatus, projectRddMode, RDD_MODE_STATUS_CHANGED, resolveRddModeStatus, type RddModeValue } from "../lib/rdd-mode-status.ts";
+import { createNativeReviewCli, type NativeReviewCli } from "../lib/native-review-cli.ts";
+import { invalidateRddModeStatus, projectRddMode, RDD_MODE_STATUS_CHANGED, resolveRddModeStatus, type RddModeScope, type RddModeValue } from "../lib/rdd-mode-status.ts";
 
 // Gentle Shell: the visual layer gentle-pi puts on top of pi. It installs the
 // status bar, the petal prompt, the working-tree changes widget and overlay,
@@ -45,7 +45,7 @@ interface BuildOptions {
 	dirty?: number;
 	usage?: ProviderUsage;
 	rddMode?: RddModeValue;
-	rddScope?: NativeReviewModeScope;
+	rddScope?: RddModeScope;
 }
 
 export type DevBinaryNotice = { state: "active"; path: string; sha256: string } | { state: "invalid"; reason: string };
@@ -134,7 +134,7 @@ export function createShellBarComponent(
 	dirty: () => number | undefined = () => undefined,
 	usage: () => ProviderUsage | undefined = () => undefined,
 	rddMode: () => RddModeValue = () => "unknown",
-	rddScope: () => NativeReviewModeScope | undefined = () => undefined,
+	rddScope: () => RddModeScope | undefined = () => undefined,
 ): ShellBarComponent {
 	const unsubscribe = footerData.onBranchChange(() => {
 		host.invalidateSidebar?.();
@@ -516,7 +516,7 @@ export default function gentleShell(pi: ExtensionAPI, env: NodeJS.ProcessEnv = p
 	let watch: NodeJS.Timeout | undefined;
 	let shown = "";
 	let rddMode: RddModeValue = "unknown";
-	let rddScope: NativeReviewModeScope | undefined;
+	let rddScope: RddModeScope | undefined;
 	let rddGeneration = 0;
 	let rddAbort: AbortController | undefined;
 	const rddReader = deps.rddModeReader === undefined ? createNativeReviewCli() : deps.rddModeReader;

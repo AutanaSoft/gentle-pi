@@ -1,8 +1,7 @@
 import { truncateToWidth, visibleWidth, wrapTextWithAnsi } from "@earendil-works/pi-tui";
 import { GAUGE_CELLS, gaugeTone, paintGauge, renderGauge, type GaugeTone } from "./shell-gauge.ts";
 import { renderUsageBar, type ProviderUsage } from "./shell-usage.ts";
-import type { RddModeValue } from "./rdd-mode-status.ts";
-import type { NativeReviewModeScope } from "./native-review-cli.ts";
+import type { RddModeScope, RddModeValue } from "./rdd-mode-status.ts";
 import { sanitizeTerminalText } from "./terminal-theme.ts";
 import { CARD_TONE, cardInnerWidth, renderCard } from "./shell-card.ts";
 
@@ -26,7 +25,7 @@ export interface ShellBarModel {
 	usage: ProviderUsage | undefined;
 	statuses: string[];
 	rddMode?: RddModeValue;
-	rddScope?: NativeReviewModeScope;
+	rddScope?: RddModeScope;
 }
 
 export interface ShellBarTheme {
@@ -86,7 +85,7 @@ export function rddModeToken(mode: RddModeValue | undefined): string {
 	return `RDD: ${mode === "on" ? "ON" : mode === "off" ? "OFF" : "?"}`;
 }
 
-function rddScopeToken(mode: RddModeValue | undefined, scope: NativeReviewModeScope | undefined): string | undefined {
+function rddScopeToken(mode: RddModeValue | undefined, scope: RddModeScope | undefined): string | undefined {
 	return mode === "unknown" || mode === undefined || scope === undefined ? undefined : `Scope: ${scope}`;
 }
 

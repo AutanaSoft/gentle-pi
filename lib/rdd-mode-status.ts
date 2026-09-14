@@ -3,12 +3,13 @@ import {
 	NATIVE_REVIEW_MODE_SCOPE,
 	NATIVE_REVIEW_MODE_SOURCE,
 	type NativeReviewCli,
-	type NativeReviewModeScope,
 	type NativeReviewModeStatus,
 } from "./native-review-cli.ts";
 
 export type RddModeValue = "on" | "off" | "unknown";
-export type RddModeStatus = NativeReviewModeStatus & { scope: NativeReviewModeScope };
+/** The scope that supplied the effective decision, distinct from result.scope query breadth. */
+export type RddModeScope = "clone" | "global" | "default";
+export type RddModeStatus = NativeReviewModeStatus & { scope: RddModeScope };
 export const RDD_STATUS_TIMEOUT_MS = 3_000;
 export const RDD_STATUS_MEMO_TTL_MS = 30_000;
 export const RDD_MODE_STATUS_CHANGED = "gentle-pi:rdd-mode-status-changed";
@@ -26,6 +27,15 @@ export function isValidRddModeStatus(status: NativeReviewModeStatus | undefined)
 /** Projects the native effective decision; cache contents are observations, never authority. */
 export function projectRddMode(status: NativeReviewModeStatus | undefined): RddModeValue {
 	return isValidRddModeStatus(status) ? status.effective : "unknown";
+}
+
+function effectiveScope(source: NativeReviewModeStatus["source"]): RddModeScope {
+	return source === NATIVE_REVIEW_MODE_SOURCE.CLONE_LOCAL ? "clone" : source;
+}
+
+/** Projects the source of the effective decision; wire scope is query breadth only. */
+export function projectRddScope(status: NativeReviewModeStatus | undefined): RddModeScope | undefined {
+	return isValidRddModeStatus(status) ? effectiveScope(status.source) : undefined;
 }
 
 function abortRejection(signal: AbortSignal): { promise: Promise<never>; dispose: () => void } {
@@ -75,7 +85,7 @@ export async function resolveRddModeStatus(
 				aborted.promise,
 			]);
 			status = isValidRddModeStatus(result.status) && Object.values(NATIVE_REVIEW_MODE_SCOPE).includes(result.scope)
-				? { ...result.status, scope: result.scope }
+				? { ...result.status, scope: projectRddScope(result.status)! }
 				: undefined;
 		} catch { status = undefined; }
 		finally {
