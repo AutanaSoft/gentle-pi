@@ -7,6 +7,7 @@ import {
 	gaugeTone,
 	renderGauge,
 	renderShellBar,
+	renderShellSidebarBar,
 	shellEnabled,
 	type ShellBarModel,
 	type ShellBarTheme,
@@ -83,6 +84,12 @@ test("renderShellBar renders RDD second and removes it before the brand at extre
 	const [minimal] = renderShellBar(model({ rddMode: "on" }), plainTheme, 14);
 	assert.match(minimal, /^✿ gentle-pi/);
 	assert.doesNotMatch(minimal, /RDD/);
+});
+
+test("renderShellSidebarBar hides scope while RDD status is unknown", () => {
+	const text = renderShellSidebarBar(model({ rddMode: "unknown", rddScope: "both" }), plainTheme, 46).join("\n");
+	assert.match(text, /RDD: \?/);
+	assert.doesNotMatch(text, /Scope:/);
 });
 
 test("renderShellBar renders one line with the segments in order", () => {

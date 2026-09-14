@@ -2,6 +2,7 @@ import { truncateToWidth, visibleWidth, wrapTextWithAnsi } from "@earendil-works
 import { GAUGE_CELLS, gaugeTone, paintGauge, renderGauge, type GaugeTone } from "./shell-gauge.ts";
 import { renderUsageBar, type ProviderUsage } from "./shell-usage.ts";
 import type { RddModeValue } from "./rdd-mode-status.ts";
+import type { NativeReviewModeScope } from "./native-review-cli.ts";
 import { sanitizeTerminalText } from "./terminal-theme.ts";
 import { CARD_TONE, cardInnerWidth, renderCard } from "./shell-card.ts";
 
@@ -25,6 +26,7 @@ export interface ShellBarModel {
 	usage: ProviderUsage | undefined;
 	statuses: string[];
 	rddMode?: RddModeValue;
+	rddScope?: NativeReviewModeScope;
 }
 
 export interface ShellBarTheme {
@@ -82,6 +84,10 @@ function sanitizeStatus(text: string): string {
 
 export function rddModeToken(mode: RddModeValue | undefined): string {
 	return `RDD: ${mode === "on" ? "ON" : mode === "off" ? "OFF" : "?"}`;
+}
+
+function rddScopeToken(mode: RddModeValue | undefined, scope: NativeReviewModeScope | undefined): string | undefined {
+	return mode === "unknown" || mode === undefined || scope === undefined ? undefined : `Scope: ${scope}`;
 }
 
 function buildSegments(model: ShellBarModel, theme: ShellBarTheme): string[] {
@@ -146,7 +152,7 @@ export function renderShellSidebarBar(model: ShellBarModel, theme: ShellBarTheme
 		},
 		{
 			title: "Review",
-			lines: [value(rddModeToken(model.rddMode))],
+			lines: [value(rddModeToken(model.rddMode)), ...(rddScopeToken(model.rddMode, model.rddScope) ? [value(rddScopeToken(model.rddMode, model.rddScope)!)] : [])],
 		},
 		{
 			title: "Model",

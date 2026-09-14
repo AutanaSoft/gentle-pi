@@ -56,10 +56,14 @@ function fakeReviewMode(
 	};
 }
 
-function modeResult(effective: "on" | "off", source: (typeof NATIVE_REVIEW_MODE_SOURCE)[keyof typeof NATIVE_REVIEW_MODE_SOURCE]): NativeReviewModeResult {
+function modeResult(
+	effective: "on" | "off",
+	source: (typeof NATIVE_REVIEW_MODE_SOURCE)[keyof typeof NATIVE_REVIEW_MODE_SOURCE],
+	scope: NativeReviewModeResult["scope"] = "global",
+): NativeReviewModeResult {
 	return {
 		operation: NATIVE_REVIEW_MODE_OPERATION.STATUS,
-		scope: "global",
+		scope,
 		status: {
 			global: effective,
 			cloneLocal: "",
@@ -97,13 +101,16 @@ test("shared resolver caches per cwd, invalidates, and only invokes status", asy
 	const operations: string[] = [];
 	const cli = { reviewMode: async (request: NativeReviewModeRequest) => {
 		operations.push(request.operation);
-		return modeResult("on", NATIVE_REVIEW_MODE_SOURCE.GLOBAL);
+		return modeResult("on", NATIVE_REVIEW_MODE_SOURCE.GLOBAL, "both");
 	} };
 	assert.equal((await resolveSharedRddModeStatus(cli, "/shared-a"))?.effective, "on");
 	assert.equal((await resolveSharedRddModeStatus(cli, "/shared-a"))?.effective, "on");
 	assert.equal((await resolveSharedRddModeStatus(cli, "/shared-b"))?.effective, "on");
 	invalidateRddModeStatus("/shared-a");
 	await resolveSharedRddModeStatus(cli, "/shared-a");
+	assert.deepEqual(await resolveSharedRddModeStatus(cli, "/shared-a"), {
+		global: "on", cloneLocal: "", effective: "on", source: "global", scope: "both",
+	});
 	assert.deepEqual(operations, ["status", "status", "status"]);
 });
 
@@ -131,18 +138,22 @@ test("shared resolver cannot let an invalidated older read overwrite a newer sam
 test("renderRddStatusLine renders the fail-closed unknown line for an unresolved status", () => {
 	assert.equal(
 		renderRddStatusLine(undefined),
-		"Receipt-driven development: unknown (native status unavailable)",
+		"Receipt-driven development: unknown (native status or scope unavailable)",
 	);
 });
 
 test("renderRddStatusLine renders the effective mode and deciding source", () => {
 	assert.equal(
-		renderRddStatusLine({ global: "on", cloneLocal: "", effective: "on", source: NATIVE_REVIEW_MODE_SOURCE.GLOBAL }),
-		"Receipt-driven development: on (decided by global)",
+		renderRddStatusLine({ global: "on", cloneLocal: "", effective: "on", source: NATIVE_REVIEW_MODE_SOURCE.GLOBAL, scope: "both" }),
+		"Receipt-driven development: on (scope: both; decided by global)",
 	);
 	assert.equal(
-		renderRddStatusLine({ global: "off", cloneLocal: "", effective: "off", source: NATIVE_REVIEW_MODE_SOURCE.DEFAULT }),
-		"Receipt-driven development: off (decided by default)",
+		renderRddStatusLine({ global: "off", cloneLocal: "", effective: "off", source: NATIVE_REVIEW_MODE_SOURCE.DEFAULT, scope: "global" }),
+		"Receipt-driven development: off (scope: global; decided by default)",
+	);
+	assert.equal(
+		renderRddStatusLine({ global: "", cloneLocal: "on", effective: "on", source: NATIVE_REVIEW_MODE_SOURCE.CLONE_LOCAL, scope: "clone" }),
+		"Receipt-driven development: on (scope: clone; decided by clone_local)",
 	);
 });
 
@@ -156,12 +167,13 @@ test("renderRddStatusLine fails closed to unknown for a malformed or partial sta
 		{ effective: "on" } as NativeReviewModeStatus, // missing source
 		{ effective: "on", source: "not-a-real-source" } as unknown as NativeReviewModeStatus,
 		{ global: "on", cloneLocal: "", effective: "ON", source: NATIVE_REVIEW_MODE_SOURCE.GLOBAL } as unknown as NativeReviewModeStatus,
+		{ global: "on", cloneLocal: "", effective: "on", source: NATIVE_REVIEW_MODE_SOURCE.GLOBAL, scope: "everywhere" } as unknown as NativeReviewModeStatus,
 		null as unknown as NativeReviewModeStatus,
 	];
 	for (const status of malformed) {
 		assert.equal(
 			renderRddStatusLine(status),
-			"Receipt-driven development: unknown (native status unavailable)",
+			"Receipt-driven development: unknown (native status or scope unavailable)",
 			`expected unknown line for ${JSON.stringify(status)}`,
 		);
 	}
@@ -175,6 +187,7 @@ test("resolveRddModeStatus reads the on status from a stubbed native reviewMode 
 		cloneLocal: "",
 		effective: "on",
 		source: "clone_local",
+		scope: "global",
 	});
 });
 
@@ -255,15 +268,15 @@ test("resolveRddStatusLine renders on, off, and unavailable from the stubbed nat
 	clearRddStatusMemoForTesting();
 	assert.equal(
 		await resolveRddStatusLine(fakeReviewMode(modeResult("on", NATIVE_REVIEW_MODE_SOURCE.GLOBAL)), "/repo-line-on"),
-		"Receipt-driven development: on (decided by global)",
+		"Receipt-driven development: on (scope: global; decided by global)",
 	);
 	assert.equal(
 		await resolveRddStatusLine(fakeReviewMode(modeResult("off", NATIVE_REVIEW_MODE_SOURCE.DEFAULT)), "/repo-line-off"),
-		"Receipt-driven development: off (decided by default)",
+		"Receipt-driven development: off (scope: global; decided by default)",
 	);
 	assert.equal(
 		await resolveRddStatusLine(undefined, "/repo-line-unknown"),
-		"Receipt-driven development: unknown (native status unavailable)",
+		"Receipt-driven development: unknown (native status or scope unavailable)",
 	);
 });
 
@@ -275,9 +288,9 @@ test("RDD_STATUS_TIMEOUT_MS is a small, positive bounded-deadline constant", () 
 test("getOrchestratorPrompt renders the resolved RDD status line next to the background policy line", () => {
 	const cwd = process.cwd();
 	for (const line of [
-		"Receipt-driven development: on (decided by global)",
-		"Receipt-driven development: off (decided by default)",
-		"Receipt-driven development: unknown (native status unavailable)",
+		"Receipt-driven development: on (scope: global; decided by global)",
+		"Receipt-driven development: off (scope: global; decided by default)",
+		"Receipt-driven development: unknown (native status or scope unavailable)",
 	]) {
 		const rendered = getOrchestratorPrompt(cwd, undefined, line);
 		assert.ok(rendered.includes(line), `rendered prompt missing RDD status line: ${line}`);
@@ -291,14 +304,14 @@ test("getOrchestratorPrompt defaults to the worst-case unknown RDD status line (
 	// caller that never resolves a status renders the longest line rather
 	// than none at all.
 	const rendered = getOrchestratorPrompt();
-	assert.ok(rendered.includes("Receipt-driven development: unknown (native status unavailable)"));
+	assert.ok(rendered.includes("Receipt-driven development: unknown (native status or scope unavailable)"));
 });
 
 test("the prompt cache key distinguishes on, off, and unknown so each renders a distinct prompt", () => {
 	const cwd = process.cwd();
-	const on = getOrchestratorPrompt(cwd, undefined, "Receipt-driven development: on (decided by global)");
-	const off = getOrchestratorPrompt(cwd, undefined, "Receipt-driven development: off (decided by default)");
-	const unknown = getOrchestratorPrompt(cwd, undefined, "Receipt-driven development: unknown (native status unavailable)");
+	const on = getOrchestratorPrompt(cwd, undefined, "Receipt-driven development: on (scope: global; decided by global)");
+	const off = getOrchestratorPrompt(cwd, undefined, "Receipt-driven development: off (scope: global; decided by default)");
+	const unknown = getOrchestratorPrompt(cwd, undefined, "Receipt-driven development: unknown (native status or scope unavailable)");
 	const none = getOrchestratorPrompt(cwd);
 	assert.notEqual(on, off);
 	assert.notEqual(off, unknown);
@@ -308,7 +321,7 @@ test("the prompt cache key distinguishes on, off, and unknown so each renders a 
 	assert.equal(none, unknown);
 	// Re-rendering the same status line returns the memoized prompt.
 	assert.equal(
-		getOrchestratorPrompt(cwd, undefined, "Receipt-driven development: on (decided by global)"),
+		getOrchestratorPrompt(cwd, undefined, "Receipt-driven development: on (scope: global; decided by global)"),
 		on,
 	);
 });
@@ -320,11 +333,11 @@ test("the on and off renders are never longer than the unknown (worst-case) rend
 	// exported NATIVE_REVIEW_MODE_SOURCE constants, not a literal list, so a
 	// future source addition is exercised automatically.
 	const cwd = process.cwd();
-	const unknownLine = "Receipt-driven development: unknown (native status unavailable)";
+	const unknownLine = "Receipt-driven development: unknown (native status or scope unavailable)";
 	const unknownBytes = Buffer.byteLength(getOrchestratorPrompt(cwd, undefined, unknownLine), "utf8");
 	for (const source of Object.values(NATIVE_REVIEW_MODE_SOURCE)) {
 		for (const effective of ["on", "off"] as const) {
-			const line = renderRddStatusLine({ global: effective, cloneLocal: "", effective, source });
+			const line = renderRddStatusLine({ global: effective, cloneLocal: "", effective, source, scope: "global" });
 			const bytes = Buffer.byteLength(getOrchestratorPrompt(cwd, undefined, line), "utf8");
 			assert.ok(
 				bytes <= unknownBytes,

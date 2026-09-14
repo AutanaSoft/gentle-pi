@@ -28,7 +28,7 @@ test("grouped Status preserves structured fields and opaque integration text", (
 	const lines = renderShellSidebarBar({
 		cwd: "/project", branch: "main", dirty: 2, sessionName: "session",
 		modelId: "model", effort: "high", contextPercent: 45, contextWindow: 1000,
-		costTotal: 1, subscription: false, rddMode: "on", statuses: ["opaque integration"],
+		costTotal: 1, subscription: false, rddMode: "on", rddScope: "both", statuses: ["opaque integration"],
 	}, theme, 46);
 	const text = lines.join("\n");
 	let previous = -1;
@@ -38,6 +38,7 @@ test("grouped Status preserves structured fields and opaque integration text", (
 		previous = index;
 	}
 	assert.match(text, /RDD: ON/);
+	assert.match(text, /Scope: both/);
 	assert.match(text, /opaque integration/);
 	assert.match(text, /Branch.*main/);
 });

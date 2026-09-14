@@ -238,8 +238,8 @@ function deferred<T>() {
 	return { promise, resolve, reject };
 }
 
-function modeResult(effective: "on" | "off"): NativeReviewModeResult {
-	return { operation: "status" as const, scope: "clone" as const, status: { global: "", cloneLocal: "", effective, source: "default" as const } };
+function modeResult(effective: "on" | "off", scope: "global" | "clone" | "both" = "clone"): NativeReviewModeResult {
+	return { operation: "status" as const, scope, status: { global: "", cloneLocal: "", effective, source: "default" as const } };
 }
 
 test("RDD lifecycle starts unknown, reads status once outside render, and updates only after resolution", async () => {
@@ -269,9 +269,11 @@ test("RDD lifecycle starts unknown, reads status once outside render, and update
 		assert.equal(renders, 1, "a changed visible value renders once");
 		pi.events.emit("gentle-pi:rdd-mode-status-changed", { cwd: "/rdd-lifecycle" });
 		assert.equal(reads.length, 2);
-		reads[1]!.result.resolve(modeResult("on"));
+		reads[1]!.result.resolve(modeResult("on", "both"));
 		await new Promise((resolve) => setImmediate(resolve));
-		assert.equal(renders, 1, "an unchanged visible value must not render again");
+		assert.equal(renders, 2, "a scope-only visible change must render once");
+		const rail = sidebarState(fakeTui as unknown as TUI).parts.get("footer") as SidebarRail;
+		assert.match(rail.render(46).join("\n"), /Scope: both/);
 	} finally { component.dispose(); }
 });
 
