@@ -191,11 +191,11 @@ export function renderShellSidebarBar(model: ShellBarModel, theme: ShellBarTheme
 		...(model.sessionName ? [`${label("Session")} ${value(model.sessionName)}`] : []),
 	];
 	const scope = rddScopeToken(model.rddMode, model.rddScope);
+	const effort = model.effort ? `${model.effort[0]?.toUpperCase()}${model.effort.slice(1)}` : undefined;
 	const modelGroup: SidebarGroup = {
 		title: "Model",
 		lines: [
-			value(model.modelId),
-			...(model.effort ? [`${label("Effort")} ${theme.fg(ROLE.EFFORT, model.effort)}`] : []),
+			effort ? `${value(model.modelId)} ${label("·")} ${theme.fg(ROLE.EFFORT, effort)}` : value(model.modelId),
 			...(model.profile ? [`${label("Profile")} ${value(sanitizeStatus(model.profile))}`] : []),
 		],
 	};

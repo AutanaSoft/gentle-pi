@@ -69,6 +69,18 @@ test("compact Status sidebar stacks Model, Review, Context, and Usage at narrow 
 	for (const line of lines) assert.ok(visibleWidth(line) <= 37);
 });
 
+test("Model renders compact model and capitalized effort, with Profile on the next line", () => {
+	const withEffort = renderShellSidebarBar({ ...statusModel, effort: "low", profile: "team" }, theme, 50);
+	const modelLine = withEffort.findIndex((line) => line.includes("model · Low"));
+	const profileLine = withEffort.findIndex((line) => line.includes("Profile team"));
+	assert.ok(modelLine >= 0, "the first Model value line combines model and capitalized effort");
+	assert.ok(profileLine > modelLine, "Profile remains on the following line");
+
+	const withoutEffort = renderShellSidebarBar({ ...statusModel, effort: undefined, profile: undefined }, theme, 50).join("\n");
+	assert.match(withoutEffort, /model/);
+	assert.doesNotMatch(withoutEffort, /model\s*·/);
+});
+
 test("Profile and Scope are independently optional without blank rows", () => {
 	for (const [profile, rddScope, present, absent] of [
 		["team", undefined, /Profile.*team/, /Scope:/],
