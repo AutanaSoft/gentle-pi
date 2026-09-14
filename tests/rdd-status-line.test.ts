@@ -276,6 +276,76 @@ test("resolveRddModeStatus promptly preserves a caller abort as the first abort"
 	assert.equal(received.reason, callerReason, "the first abort reason must win");
 });
 
+test("resolveRddModeStatus does not memoize a caller-aborted read", async () => {
+	clearRddStatusMemoForTesting();
+	const caller = new AbortController();
+	let calls = 0;
+	const cli = {
+		reviewMode: (): Promise<NativeReviewModeResult> => {
+			calls += 1;
+			return calls === 1 ? new Promise<never>(() => {}) : Promise.resolve(modeResult("on", NATIVE_REVIEW_MODE_SOURCE.GLOBAL));
+		},
+	};
+	const pending = resolveSharedRddModeStatus(cli, "/repo-caller-abort-no-memo", caller.signal);
+	await Promise.resolve();
+	caller.abort(new Error("caller cancelled"));
+	assert.equal(await pending, undefined);
+
+	const status = await resolveSharedRddModeStatus(cli, "/repo-caller-abort-no-memo");
+	assert.equal(calls, 2, "a caller-aborted read must not cache undefined");
+	assert.equal(status?.effective, "on");
+});
+
+test("resolveRddModeStatus memoizes an ordinary rejection despite a caller abort before catch", async () => {
+	clearRddStatusMemoForTesting();
+	const caller = new AbortController();
+	let calls = 0;
+	const cli = {
+		reviewMode: (): Promise<NativeReviewModeResult> => new Promise((_resolve, reject) => {
+			calls += 1;
+			reject(new Error("native process failed"));
+			queueMicrotask(() => caller.abort(new Error("concurrent caller cancellation")));
+		}),
+	};
+	const cwd = "/repo-ordinary-rejection-concurrent-abort";
+	assert.equal(await resolveSharedRddModeStatus(cli, cwd, caller.signal), undefined);
+	assert.equal(caller.signal.aborted, true, "the caller must abort before the catch observes the rejection");
+	assert.equal(await resolveSharedRddModeStatus(cli, cwd), undefined);
+	assert.equal(calls, 1, "an ordinary rejection must remain memoized");
+});
+
+test("resolveRddModeStatus memoizes malformed results and internal timeouts", async () => {
+	clearRddStatusMemoForTesting();
+	let malformedCalls = 0;
+	const malformed = {
+		reviewMode: async (): Promise<NativeReviewModeResult> => {
+			malformedCalls += 1;
+			return modeResult("on", NATIVE_REVIEW_MODE_SOURCE.GLOBAL, "invalid" as NativeReviewModeResult["scope"]);
+		},
+	};
+	const malformedCwd = "/repo-malformed-memo";
+	assert.equal(await resolveSharedRddModeStatus(malformed, malformedCwd), undefined);
+	assert.equal(await resolveSharedRddModeStatus(malformed, malformedCwd), undefined);
+	assert.equal(malformedCalls, 1, "malformed results must cache the fail-closed undefined observation");
+
+	clearRddStatusMemoForTesting();
+	let timeoutCalls = 0;
+	const deadline = new AbortController();
+	const timedOut = {
+		reviewMode: (): Promise<NativeReviewModeResult> => {
+			timeoutCalls += 1;
+			return new Promise<NativeReviewModeResult>(() => {});
+		},
+	};
+	const timeoutCwd = "/repo-internal-timeout-memo";
+	const pending = resolveSharedRddModeStatus(timedOut, timeoutCwd, undefined, Date.now, deadline.signal);
+	await Promise.resolve();
+	deadline.abort(new Error("internal deadline"));
+	assert.equal(await pending, undefined);
+	assert.equal(await resolveSharedRddModeStatus(timedOut, timeoutCwd), undefined);
+	assert.equal(timeoutCalls, 1, "internal timeout observations must remain memoized");
+});
+
 test("resolveRddModeStatus memoizes a resolved status per cwd for RDD_STATUS_MEMO_TTL_MS", async () => {
 	clearRddStatusMemoForTesting();
 	const { cli, calls } = countingReviewMode(modeResult("on", NATIVE_REVIEW_MODE_SOURCE.GLOBAL));
