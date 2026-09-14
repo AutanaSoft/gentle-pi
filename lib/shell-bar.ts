@@ -11,6 +11,7 @@ export { gaugeTone, renderGauge, type GaugeTone };
 // verified without a live TUI.
 
 export interface ShellBarModel {
+	profile?: string;
 	cwd: string;
 	branch: string | null;
 	dirty: number | undefined;
@@ -180,7 +181,9 @@ export function renderShellSidebarBar(model: ShellBarModel, theme: ShellBarTheme
 		...(branchStatus ? [branchStatus] : []),
 		...(model.sessionName ? [`${label("Session")} ${value(model.sessionName)}`] : []),
 	];
+	const profile = model.profile ? sanitizeStatus(model.profile) : "";
 	const modelLine = `${label("Model:")} ${value(model.modelId)}${model.effort ? ` ${label("-")} ${theme.fg(ROLE.EFFORT, capitalize(model.effort))}` : ""}`;
+	const profileLine = `${label("Profile:")} ${value(profile)}`;
 	const contextGroup: SidebarGroup = {
 		title: "Context",
 		lines: [`${paintGauge(model.contextPercent, theme)} ${value(percent)}`, label(`${formatTokens(model.contextWindow)} tokens`)],
@@ -197,6 +200,7 @@ export function renderShellSidebarBar(model: ShellBarModel, theme: ShellBarTheme
 		...project.flatMap((line) => wrapTextWithAnsi(line, innerWidth)),
 		"",
 		...wrapTextWithAnsi(modelLine, innerWidth),
+		...(profile ? wrapTextWithAnsi(profileLine, innerWidth) : []),
 		"",
 		...columnGroups(contextGroup, usageGroup, label, innerWidth),
 		...(integrations ? ["", ...wrappedGroup(integrations, label, innerWidth)] : []),
