@@ -27,7 +27,7 @@ function rail(f: ReturnType<typeof fixture>): ScrollView {
 const statusModel = {
 	cwd: "/workspace/プロジェクト/", branch: "feature/compact-status-sidebar", dirty: 2, sessionName: "session",
 	modelId: "model", effort: "high", contextPercent: 45, contextWindow: 272_000,
-	costTotal: 14.35, subscription: true, rddMode: "on" as const,
+	costTotal: 14.35, subscription: true, rddMode: "on" as const, rddScope: "both" as const,
 	usage: { provider: "openai-codex", plan: undefined, fetchedAt: 0, limits: [{ name: "codex", limitReached: false, windows: [
 		{ label: "week", usedPercent: 29, windowSeconds: 604_800, resetAt: null },
 		{ label: "24h", usedPercent: 38, windowSeconds: 86_400, resetAt: null },
@@ -35,11 +35,12 @@ const statusModel = {
 	statuses: ["opaque\u001b[31m integration\nstate"],
 };
 
-test("compact Status sidebar preserves structured RDD, compact project fields, and responsive columns", () => {
+test("compact Status sidebar preserves structured RDD, scope, compact project fields, and responsive columns", () => {
 	for (const [rddMode, token] of [["on", "RDD: ON"], ["off", "RDD: OFF"], ["unknown", "RDD: ?"]] as const) {
 		const lines = renderShellSidebarBar({ ...statusModel, rddMode }, theme, 50);
 		const text = lines.join("\n");
 		assert.match(text, new RegExp(token.replace("?", "\\?")));
+		assert.equal(text.includes("Scope: both"), rddMode !== "unknown");
 		assert.doesNotMatch(text, /Project/);
 		assert.match(text, /プロジェクト/);
 		assert.doesNotMatch(text, /workspace/);
@@ -65,6 +66,7 @@ test("compact Status sidebar stacks Model then Review and Context then Usage whe
 	const lines = renderShellSidebarBar({ ...statusModel, branch: null, effort: undefined, sessionName: undefined, usage: undefined, statuses: [] }, theme, 34);
 	const text = lines.join("\n");
 	assert.match(text, /\+2/);
+	assert.match(text, /Scope: both/);
 	assert.doesNotMatch(text, /|Session|Integrations|week|codex/);
 	assert.ok(!lines.some((line) => line.includes("Review") && line.includes("Model")));
 	assert.ok(text.indexOf("Model") < text.indexOf("Review"));

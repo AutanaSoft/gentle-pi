@@ -1,16 +1,19 @@
 import {
 	NATIVE_REVIEW_MODE_OPERATION,
+	NATIVE_REVIEW_MODE_SCOPE,
 	NATIVE_REVIEW_MODE_SOURCE,
 	type NativeReviewCli,
+	type NativeReviewModeScope,
 	type NativeReviewModeStatus,
 } from "./native-review-cli.ts";
 
 export type RddModeValue = "on" | "off" | "unknown";
+export type RddModeStatus = NativeReviewModeStatus & { scope: NativeReviewModeScope };
 export const RDD_STATUS_TIMEOUT_MS = 3_000;
 export const RDD_STATUS_MEMO_TTL_MS = 30_000;
 export const RDD_MODE_STATUS_CHANGED = "gentle-pi:rdd-mode-status-changed";
 
-const memo = new Map<string, { status: NativeReviewModeStatus | undefined; expiresAt: number }>();
+const memo = new Map<string, { status: RddModeStatus | undefined; expiresAt: number }>();
 let memoEpoch = 0;
 const memoGeneration = new Map<string, number>();
 
@@ -37,13 +40,13 @@ export async function resolveRddModeStatus(
 	cwd: string,
 	signal?: AbortSignal,
 	now: () => number = Date.now,
-): Promise<NativeReviewModeStatus | undefined> {
+): Promise<RddModeStatus | undefined> {
 	const nowMs = now();
 	const cached = memo.get(cwd);
 	if (cached && cached.expiresAt > nowMs) return cached.status;
 	const epoch = memoEpoch;
 	const generation = memoGeneration.get(cwd) ?? 0;
-	let status: NativeReviewModeStatus | undefined;
+	let status: RddModeStatus | undefined;
 	if (nativeReviewCli?.reviewMode) {
 		const timeout = signal ?? AbortSignal.timeout(RDD_STATUS_TIMEOUT_MS);
 		try {
@@ -51,7 +54,9 @@ export async function resolveRddModeStatus(
 				nativeReviewCli.reviewMode({ cwd, operation: NATIVE_REVIEW_MODE_OPERATION.STATUS, signal: timeout }),
 				abortRejection(timeout),
 			]);
-			status = isValidRddModeStatus(result.status) ? result.status : undefined;
+			status = isValidRddModeStatus(result.status) && Object.values(NATIVE_REVIEW_MODE_SCOPE).includes(result.scope)
+				? { ...result.status, scope: result.scope }
+				: undefined;
 		} catch { status = undefined; }
 	}
 	// An invalidation means a newer authoritative observation is required. A

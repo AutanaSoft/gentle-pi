@@ -42,6 +42,7 @@ import {
 	RDD_STATUS_MEMO_TTL_MS as SHARED_RDD_STATUS_MEMO_TTL_MS,
 	RDD_STATUS_TIMEOUT_MS as SHARED_RDD_STATUS_TIMEOUT_MS,
 	resolveRddModeStatus as resolveSharedRddModeStatus,
+	type RddModeStatus,
 } from "../lib/rdd-mode-status.ts";
 import {
 	ensureSddPreflight,
@@ -984,11 +985,12 @@ function isValidRddModeStatus(
  * it never throws.
  */
 function renderRddStatusLine(
-	status: NativeReviewModeStatus | undefined,
+	status: NativeReviewModeStatus | RddModeStatus | undefined,
 ): string {
-	return isValidRddModeStatus(status)
-		? `Receipt-driven development: ${status.effective} (decided by ${status.source})`
-		: "Receipt-driven development: unknown (native status unavailable)";
+	const scope = status != null && typeof status === "object" && "scope" in status ? status.scope : undefined;
+	return status != null && isValidRddModeStatus(status) && (scope === "global" || scope === "clone" || scope === "both")
+		? `Receipt-driven development: ${status.effective} (scope: ${scope}; decided by ${status.source})`
+		: "Receipt-driven development: unknown (native status or scope unavailable)";
 }
 
 // The primary-session prompt awaits this on every non-SDD, non-named agent
@@ -1187,7 +1189,7 @@ async function resolveRddModeStatus(
 	signal?: AbortSignal,
 	now: () => number = Date.now,
 	ctx?: Pick<ExtensionContext, "hasUI" | "ui">,
-): Promise<NativeReviewModeStatus | undefined> {
+): Promise<RddModeStatus | undefined> {
 	const status = await resolveSharedRddModeStatus(nativeReviewCli, cwd, signal, now);
 	if (status === undefined && !rddStatusUnavailableWarned) {
 		rddStatusUnavailableWarned = true;
@@ -8923,7 +8925,7 @@ function createGentleAiExtensionForTesting(
 					invalidateRddModeStatus(ctx.cwd);
 					pi.events.emit(RDD_MODE_STATUS_CHANGED, { cwd: ctx.cwd });
 				}
-				const report = `receipt-driven development: ${result.status.effective} (decided by ${result.status.source})`;
+				const report = renderRddStatusLine({ ...result.status, scope: result.scope });
 				// A mutating sub-action that left the effective mode unchanged did
 				// not do what the user asked, and reporting only the resulting
 				// status reads as if it had. This is reachable for exactly one

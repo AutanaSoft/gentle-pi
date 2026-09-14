@@ -15,7 +15,7 @@ import { accountIdFromToken, CODEX_PROVIDER, CODEX_USAGE_URL, parseCodexUsage, p
 import { UsageView } from "../lib/shell-usage-view.ts";
 import { sidebarPart } from "../lib/shell-sidebar.ts";
 import { installSidebar, invalidateSidebar } from "../lib/shell-sidebar-layout.ts";
-import { createNativeReviewCli, type NativeReviewCli } from "../lib/native-review-cli.ts";
+import { createNativeReviewCli, type NativeReviewCli, type NativeReviewModeScope } from "../lib/native-review-cli.ts";
 import { invalidateRddModeStatus, projectRddMode, RDD_MODE_STATUS_CHANGED, resolveRddModeStatus, type RddModeValue } from "../lib/rdd-mode-status.ts";
 
 // Gentle Shell: the visual layer gentle-pi puts on top of pi. It installs the
@@ -45,6 +45,7 @@ interface BuildOptions {
 	dirty?: number;
 	usage?: ProviderUsage;
 	rddMode?: RddModeValue;
+	rddScope?: NativeReviewModeScope;
 }
 
 export type DevBinaryNotice = { state: "active"; path: string; sha256: string } | { state: "invalid"; reason: string };
@@ -119,6 +120,7 @@ export function buildShellBarModel(
 		subscription: model ? ctx.modelRegistry.isUsingOAuth(model) : false,
 		usage: options.usage,
 		rddMode: options.rddMode,
+		rddScope: options.rddScope,
 		statuses,
 	};
 }
@@ -132,6 +134,7 @@ export function createShellBarComponent(
 	dirty: () => number | undefined = () => undefined,
 	usage: () => ProviderUsage | undefined = () => undefined,
 	rddMode: () => RddModeValue = () => "unknown",
+	rddScope: () => NativeReviewModeScope | undefined = () => undefined,
 ): ShellBarComponent {
 	const unsubscribe = footerData.onBranchChange(() => {
 		host.invalidateSidebar?.();
@@ -139,7 +142,7 @@ export function createShellBarComponent(
 	});
 	return {
 		render(width: number) {
-			return renderShellBar(buildShellBarModel(pi, ctx, footerData, { dirty: dirty(), usage: usage(), rddMode: rddMode() }), theme, width);
+			return renderShellBar(buildShellBarModel(pi, ctx, footerData, { dirty: dirty(), usage: usage(), rddMode: rddMode(), rddScope: rddScope() }), theme, width);
 		},
 		invalidate() {},
 		dispose() {
@@ -513,6 +516,7 @@ export default function gentleShell(pi: ExtensionAPI, env: NodeJS.ProcessEnv = p
 	let watch: NodeJS.Timeout | undefined;
 	let shown = "";
 	let rddMode: RddModeValue = "unknown";
+	let rddScope: NativeReviewModeScope | undefined;
 	let rddGeneration = 0;
 	let rddAbort: AbortController | undefined;
 	const rddReader = deps.rddModeReader === undefined ? createNativeReviewCli() : deps.rddModeReader;
@@ -526,8 +530,10 @@ export default function gentleShell(pi: ExtensionAPI, env: NodeJS.ProcessEnv = p
 		void resolveRddModeStatus(rddReader, cwd, rddAbort.signal).then((status) => {
 			if (generation !== rddGeneration || rddAbort?.signal.aborted || currentContext !== ctx || ctx.sessionManager.getSessionId() !== sessionId || ctx.cwd !== cwd) return;
 			const next = projectRddMode(status);
-			if (next === rddMode) return;
+			const nextScope = next === "unknown" ? undefined : status?.scope;
+			if (next === rddMode && nextScope === rddScope) return;
 			rddMode = next;
+			rddScope = nextScope;
 			renderHost?.invalidateSidebar?.();
 			renderHost?.requestRender();
 		});
@@ -577,6 +583,7 @@ export default function gentleShell(pi: ExtensionAPI, env: NodeJS.ProcessEnv = p
 		pendingTools.clear();
 		currentContext = ctx;
 		rddMode = "unknown";
+		rddScope = undefined;
 		changes = undefined;
 		registry = new SessionWorktreeRegistry(pi, ctx.sessionManager, ctx.cwd, deps.resolveWorktree);
 		registry.start();
@@ -586,12 +593,12 @@ export default function gentleShell(pi: ExtensionAPI, env: NodeJS.ProcessEnv = p
 		const tracker = changes;
 		ctx.ui.setFooter((tui, theme, footerData) => {
 			renderHost = { requestRender: () => tui.requestRender(), invalidateSidebar: () => invalidateSidebar(tui) };
-			const bottom = createShellBarComponent(pi, ctx, renderHost, theme, footerData, () => tracker.model.files.length, () => usage.get(ctx.model?.provider ?? ""), () => rddMode);
+			const bottom = createShellBarComponent(pi, ctx, renderHost, theme, footerData, () => tracker.model.files.length, () => usage.get(ctx.model?.provider ?? ""), () => rddMode, () => rddScope);
 			// The Status card paints live session state that no event re-registers a
 			// part for: model, effort, context, cost, session name and extension
 			// statuses. The digest is what keeps the fullscreen memo honest, and it
 			// rebuilds the model exactly as the narrow bottom bar does every frame.
-			const footerModel = () => buildShellBarModel(pi, ctx, footerData, { dirty: tracker.model.files.length, usage: usage.get(ctx.model?.provider ?? ""), rddMode });
+			const footerModel = () => buildShellBarModel(pi, ctx, footerData, { dirty: tracker.model.files.length, usage: usage.get(ctx.model?.provider ?? ""), rddMode, rddScope });
 			const part = sidebarPart(tui, "footer", bottom, {
 				digest: () => JSON.stringify(footerModel()),
 				render: (width) => renderShellSidebarBar(footerModel(), theme, width),

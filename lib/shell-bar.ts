@@ -2,6 +2,7 @@ import { truncateToWidth, visibleWidth, wrapTextWithAnsi } from "@earendil-works
 import { GAUGE_CELLS, gaugeTone, paintGauge, renderGauge, type GaugeTone } from "./shell-gauge.ts";
 import { renderUsageBar, type ProviderUsage } from "./shell-usage.ts";
 import type { RddModeValue } from "./rdd-mode-status.ts";
+import type { NativeReviewModeScope } from "./native-review-cli.ts";
 import { sanitizeTerminalText } from "./terminal-theme.ts";
 import { CARD_TONE, cardInnerWidth, renderCard } from "./shell-card.ts";
 
@@ -25,6 +26,7 @@ export interface ShellBarModel {
 	usage: ProviderUsage | undefined;
 	statuses: string[];
 	rddMode?: RddModeValue;
+	rddScope?: NativeReviewModeScope;
 }
 
 export interface ShellBarTheme {
@@ -101,6 +103,10 @@ interface ShellBarFields {
 	usage?: [full: string, compact: string, percentOnly: string];
 	statuses: string[];
 	session?: string;
+}
+
+function rddScopeToken(mode: RddModeValue | undefined, scope: NativeReviewModeScope | undefined): string | undefined {
+	return mode === "unknown" || mode === undefined || scope === undefined ? undefined : `Scope: ${scope}`;
 }
 
 function projectName(cwd: string): string {
@@ -279,7 +285,8 @@ export function renderShellSidebarBar(model: ShellBarModel, theme: ShellBarTheme
 		...(branchStatus ? [branchStatus] : []),
 		...(sessionName ? [`${label("Session")} ${value(sessionName)}`] : []),
 	];
-	const reviewGroup: SidebarGroup = { title: "Review", lines: [value(rddModeToken(model.rddMode))] };
+	const scope = rddScopeToken(model.rddMode, model.rddScope);
+	const reviewGroup: SidebarGroup = { title: "Review", lines: [value(rddModeToken(model.rddMode)), ...(scope ? [value(scope)] : [])] };
 	const modelGroup: SidebarGroup = {
 		title: "Model",
 		lines: [`${value(modelId)}${effort ? ` ${label("·")} ${theme.fg(ROLE.EFFORT, effort)}` : ""}`],
