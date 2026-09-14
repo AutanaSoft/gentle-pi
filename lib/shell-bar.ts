@@ -11,6 +11,7 @@ export { gaugeTone, renderGauge, type GaugeTone };
 // a live TUI.
 
 export interface ShellBarModel {
+	profile?: string;
 	cwd: string;
 	branch: string | null;
 	dirty: number | undefined;
@@ -223,7 +224,11 @@ export function renderShellSidebarBar(model: ShellBarModel, theme: ShellBarTheme
 		},
 		{
 			title: "Model",
-			lines: [value(modelId), ...(effort ? [`${label("Effort")} ${theme.fg(ROLE.EFFORT, effort)}`] : [])],
+			lines: [
+				value(modelId),
+				...(effort ? [`${label("Effort")} ${theme.fg(ROLE.EFFORT, effort)}`] : []),
+				...(model.profile ? [`${label("Profile")} ${value(sanitizeBarText(model.profile))}`] : []),
+			],
 		},
 		{
 			title: "Context",
