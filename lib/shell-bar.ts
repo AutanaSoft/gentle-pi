@@ -1,6 +1,7 @@
 import { truncateToWidth, visibleWidth, wrapTextWithAnsi } from "@earendil-works/pi-tui";
 import { GAUGE_CELLS, gaugeTone, paintGauge, renderGauge, type GaugeTone } from "./shell-gauge.ts";
 import { renderUsageBar, type ProviderUsage } from "./shell-usage.ts";
+import type { RddModeScope, RddModeValue } from "./rdd-mode-status.ts";
 import { sanitizeTerminalText } from "./terminal-theme.ts";
 import { CARD_TONE, cardInnerWidth, renderCard } from "./shell-card.ts";
 
@@ -24,6 +25,8 @@ export interface ShellBarModel {
 	subscription: boolean;
 	usage: ProviderUsage | undefined;
 	statuses: string[];
+	rddMode?: RddModeValue;
+	rddScope?: RddModeScope;
 }
 
 export interface ShellBarTheme {
@@ -44,6 +47,7 @@ const ROLE = {
 	LABEL: "muted",
 	VALUE: "text",
 	STATUS: "muted",
+	RDD: "syntaxFunction",
 	SESSION: "dim",
 } as const;
 
@@ -83,6 +87,14 @@ function sanitizeStatus(text: string): string {
 	return sanitizeTerminalText(text.replace(/[\r\n\t]/g, " ")).replace(/ +/g, " ").trim();
 }
 
+export function rddModeToken(mode: RddModeValue | undefined): string {
+	return `RDD: ${mode === "on" ? "ON" : mode === "off" ? "OFF" : "?"}`;
+}
+
+function rddScopeToken(mode: RddModeValue | undefined, scope: RddModeScope | undefined): string | undefined {
+	return mode === "unknown" || mode === undefined || scope === undefined ? undefined : `Scope: ${scope}`;
+}
+
 function buildSegments(model: ShellBarModel, theme: ShellBarTheme): string[] {
 	const dirty = model.dirty ? ` ${theme.fg(ROLE.DIRTY, `±${model.dirty}`)}` : "";
 	const location = model.branch
@@ -96,7 +108,8 @@ function buildSegments(model: ShellBarModel, theme: ShellBarTheme): string[] {
 	const cost = theme.fg(ROLE.VALUE, formatCost(model.costTotal, model.subscription));
 	const usage = model.usage ? renderUsageBar(model.usage, theme) : undefined;
 	const statuses = model.statuses.map((status) => theme.fg(ROLE.STATUS, sanitizeStatus(status)));
-	return [theme.fg(ROLE.BRAND, SHELL_BAR_BRAND), location, modelSegment, context, cost, ...(usage ? [usage] : []), ...statuses];
+	const rdd = theme.fg(ROLE.RDD, rddModeToken(model.rddMode));
+	return [theme.fg(ROLE.BRAND, SHELL_BAR_BRAND), rdd, location, modelSegment, context, cost, ...(usage ? [usage] : []), ...statuses];
 }
 
 // When the line overflows, the location gives way first: the path shrinks to
@@ -161,10 +174,6 @@ function renderSidebarUsage(usage: ProviderUsage, theme: ShellBarTheme): string 
 	return [head, ...tail].join(" ");
 }
 
-function capitalize(text: string): string {
-	return text[0]?.toUpperCase() + text.slice(1);
-}
-
 // Sidebar groups use structured fields, never positional compact-bar segments
 // or inferred meanings from opaque extension status strings.
 export function renderShellSidebarBar(model: ShellBarModel, theme: ShellBarTheme, width: number): string[] {
@@ -181,9 +190,19 @@ export function renderShellSidebarBar(model: ShellBarModel, theme: ShellBarTheme
 		...(branchStatus ? [branchStatus] : []),
 		...(model.sessionName ? [`${label("Session")} ${value(model.sessionName)}`] : []),
 	];
-	const profile = model.profile ? sanitizeStatus(model.profile) : "";
-	const modelLine = `${label("Model:")} ${value(model.modelId)}${model.effort ? ` ${label("-")} ${theme.fg(ROLE.EFFORT, capitalize(model.effort))}` : ""}`;
-	const profileLine = `${label("Profile:")} ${value(profile)}`;
+	const scope = rddScopeToken(model.rddMode, model.rddScope);
+	const modelGroup: SidebarGroup = {
+		title: "Model",
+		lines: [
+			value(model.modelId),
+			...(model.effort ? [`${label("Effort")} ${theme.fg(ROLE.EFFORT, model.effort)}`] : []),
+			...(model.profile ? [`${label("Profile")} ${value(sanitizeStatus(model.profile))}`] : []),
+		],
+	};
+	const reviewGroup: SidebarGroup = {
+		title: "Review",
+		lines: [value(rddModeToken(model.rddMode)), ...(scope ? [value(scope)] : [])],
+	};
 	const contextGroup: SidebarGroup = {
 		title: "Context",
 		lines: [`${paintGauge(model.contextPercent, theme)} ${value(percent)}`, label(`${formatTokens(model.contextWindow)} tokens`)],
@@ -199,8 +218,7 @@ export function renderShellSidebarBar(model: ShellBarModel, theme: ShellBarTheme
 	const body = [
 		...project.flatMap((line) => wrapTextWithAnsi(line, innerWidth)),
 		"",
-		...wrapTextWithAnsi(modelLine, innerWidth),
-		...(profile ? wrapTextWithAnsi(profileLine, innerWidth) : []),
+		...columnGroups(modelGroup, reviewGroup, label, innerWidth),
 		"",
 		...columnGroups(contextGroup, usageGroup, label, innerWidth),
 		...(integrations ? ["", ...wrappedGroup(integrations, label, innerWidth)] : []),
