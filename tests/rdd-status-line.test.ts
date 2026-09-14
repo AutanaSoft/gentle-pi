@@ -233,6 +233,43 @@ test("resolveRddModeStatus resolves to undefined within the deadline when review
 	assert.ok(elapsed < deadlineMs + 1000, `expected the read to resolve near the ${deadlineMs}ms deadline, took ${elapsed}ms`);
 });
 
+test("resolveRddModeStatus keeps its internal deadline when the caller signal never aborts", async () => {
+	clearRddStatusMemoForTesting();
+	const caller = new AbortController();
+	const deadline = new AbortController();
+	let received!: AbortSignal;
+	const cli = { reviewMode: ({ signal }: NativeReviewModeRequest) => {
+		received = signal!;
+		return new Promise<NativeReviewModeResult>(() => {});
+	} };
+	const pending = resolveSharedRddModeStatus(cli, "/repo-internal-deadline", caller.signal, Date.now, deadline.signal);
+	await Promise.resolve();
+	assert.notEqual(received, caller.signal, "the resolver must retain its own deadline alongside the caller signal");
+	deadline.abort(new Error("internal deadline"));
+	assert.equal(await pending, undefined);
+});
+
+test("resolveRddModeStatus promptly preserves a caller abort as the first abort", async () => {
+	clearRddStatusMemoForTesting();
+	const caller = new AbortController();
+	const deadline = new AbortController();
+	const callerReason = new Error("caller cancelled");
+	let received!: AbortSignal;
+	const cli = { reviewMode: ({ signal }: NativeReviewModeRequest) => {
+		received = signal!;
+		return new Promise<NativeReviewModeResult>((_resolve, reject) => {
+			signal!.addEventListener("abort", () => reject(signal!.reason), { once: true });
+		});
+	} };
+	const pending = resolveSharedRddModeStatus(cli, "/repo-caller-abort", caller.signal, Date.now, deadline.signal);
+	await Promise.resolve();
+	caller.abort(callerReason);
+	deadline.abort(new Error("later deadline"));
+	assert.equal(await pending, undefined);
+	assert.notEqual(received, caller.signal, "the resolver must pass the combined signal to reviewMode");
+	assert.equal(received.reason, callerReason, "the first abort reason must win");
+});
+
 test("resolveRddModeStatus memoizes a resolved status per cwd for RDD_STATUS_MEMO_TTL_MS", async () => {
 	clearRddStatusMemoForTesting();
 	const { cli, calls } = countingReviewMode(modeResult("on", NATIVE_REVIEW_MODE_SOURCE.GLOBAL));

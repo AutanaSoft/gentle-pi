@@ -28,11 +28,29 @@ export function projectRddMode(status: NativeReviewModeStatus | undefined): RddM
 	return isValidRddModeStatus(status) ? status.effective : "unknown";
 }
 
-function abortRejection(signal: AbortSignal): Promise<never> {
-	return new Promise((_resolve, reject) => {
+function abortRejection(signal: AbortSignal): { promise: Promise<never>; dispose: () => void } {
+	let listener: (() => void) | undefined;
+	const promise = new Promise<never>((_resolve, reject) => {
 		if (signal.aborted) return reject(signal.reason ?? new Error("aborted"));
-		signal.addEventListener("abort", () => reject(signal.reason ?? new Error("aborted")), { once: true });
+		listener = () => reject(signal.reason ?? new Error("aborted"));
+		signal.addEventListener("abort", listener, { once: true });
 	});
+	return { promise, dispose: () => listener && signal.removeEventListener("abort", listener) };
+}
+
+function combineAbortSignals(timeout: AbortSignal, caller?: AbortSignal): { signal: AbortSignal; dispose: () => void } {
+	const controller = new AbortController();
+	const sources = caller === undefined ? [timeout] : [timeout, caller];
+	const listeners = sources.map((source) => {
+		const abort = () => controller.abort(source.reason ?? new Error("aborted"));
+		if (source.aborted) abort();
+		else source.addEventListener("abort", abort, { once: true });
+		return { source, abort };
+	});
+	return {
+		signal: controller.signal,
+		dispose: () => listeners.forEach(({ source, abort }) => source.removeEventListener("abort", abort)),
+	};
 }
 
 export async function resolveRddModeStatus(
@@ -40,6 +58,7 @@ export async function resolveRddModeStatus(
 	cwd: string,
 	signal?: AbortSignal,
 	now: () => number = Date.now,
+	timeoutSignal: AbortSignal = AbortSignal.timeout(RDD_STATUS_TIMEOUT_MS),
 ): Promise<RddModeStatus | undefined> {
 	const nowMs = now();
 	const cached = memo.get(cwd);
@@ -48,16 +67,21 @@ export async function resolveRddModeStatus(
 	const generation = memoGeneration.get(cwd) ?? 0;
 	let status: RddModeStatus | undefined;
 	if (nativeReviewCli?.reviewMode) {
-		const timeout = signal ?? AbortSignal.timeout(RDD_STATUS_TIMEOUT_MS);
+		const combined = combineAbortSignals(timeoutSignal, signal);
+		const aborted = abortRejection(combined.signal);
 		try {
 			const result = await Promise.race([
-				nativeReviewCli.reviewMode({ cwd, operation: NATIVE_REVIEW_MODE_OPERATION.STATUS, signal: timeout }),
-				abortRejection(timeout),
+				nativeReviewCli.reviewMode({ cwd, operation: NATIVE_REVIEW_MODE_OPERATION.STATUS, signal: combined.signal }),
+				aborted.promise,
 			]);
 			status = isValidRddModeStatus(result.status) && Object.values(NATIVE_REVIEW_MODE_SCOPE).includes(result.scope)
 				? { ...result.status, scope: result.scope }
 				: undefined;
 		} catch { status = undefined; }
+		finally {
+			aborted.dispose();
+			combined.dispose();
+		}
 	}
 	// An invalidation means a newer authoritative observation is required. A
 	// completion started before it may still return to its caller, but cannot
