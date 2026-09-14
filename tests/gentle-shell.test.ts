@@ -231,10 +231,12 @@ test("gentleShell installs the footer on session_start when a UI exists", () => 
 });
 
 test("the fullscreen Status rail carries a live digest so a model switch refreshes it", async () => {
-	const { pi, handlers } = fakePi();
+	const { pi, handlers } = fakePi([{ numstat: "1\t0\tmaintained.ts\n", porcelain: " M maintained.ts\0" }]);
 	gentleShell(pi, { GENTLE_PI_SHELL_CHANGES_WATCH_MS: "off" });
 	const entries: unknown[] = [];
 	const { ctx, ui } = fakeContext({ entries });
+	(ctx.model as { contextWindow: number }).contextWindow = 512_000;
+	(ctx as unknown as { getContextUsage: () => unknown }).getContextUsage = () => ({ tokens: 122_400, contextWindow: 123_000, percent: 45 });
 	await fire(handlers, "session_start", ctx);
 
 	const statuses = new Map<string, string>();
@@ -247,6 +249,18 @@ test("the fullscreen Status rail carries a live digest so a model switch refresh
 		const live = () => rail.digest?.();
 		assert.equal(typeof rail.digest, "function", "the Status card paints live state and must declare a digest");
 		assert.match(rail.render(46).join("\n"), /gpt-5\.5/);
+		for (const [label, pattern] of [
+			["context usage window wins over the model fallback", /123k tokens/],
+			["dirty count", /\+1/],
+			["session name", /Session Release notes/],
+		] as const) assert.match(stripAnsi(rail.render(46).join("\n")), pattern, label);
+		for (const handler of handlers.get("after_provider_response") ?? []) {
+			handler({ status: 200, headers: { "x-codex-primary-used-percent": "62", "x-codex-primary-window-minutes": "300", "x-codex-secondary-used-percent": "31", "x-codex-secondary-window-minutes": "10080" } }, ctx);
+		}
+		for (const [label, pattern] of [
+			["Codex primary window", /5h[\s\S]*62%/],
+			["Codex secondary window", /week[\s\S]*31%/],
+		] as const) assert.match(stripAnsi(rail.render(46).join("\n")), pattern, label);
 
 		const beforeModel = live();
 		(ctx.model as { id: string }).id = "gpt-5.6";
