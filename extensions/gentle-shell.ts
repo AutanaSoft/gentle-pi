@@ -569,7 +569,7 @@ export default function gentleShell(pi: ExtensionAPI, env: NodeJS.ProcessEnv = p
 		const model = await tracker.refresh();
 		if (changes === tracker) applyChanges(ctx, model);
 	};
-	const unsubscribeWorktrees = pi.events.on(SESSION_CHANGE_EVENT, (data) => {
+	pi.events.on(SESSION_CHANGE_EVENT, (data) => {
 		if (!currentContext || !registry || (data as { sessionId?: string } | undefined)?.sessionId !== registry.sessionId) return;
 		if ((data as { notice?: string }).notice) currentContext.ui.notify((data as { notice: string }).notice, "warning");
 		void refreshChanges(currentContext);
@@ -646,7 +646,6 @@ export default function gentleShell(pi: ExtensionAPI, env: NodeJS.ProcessEnv = p
 		registry = undefined;
 		changes = undefined;
 		currentContext = undefined;
-		unsubscribeWorktrees();
 	});
 	const openChanges = async (ctx: ExtensionContext) => {
 		if (!changes) return;

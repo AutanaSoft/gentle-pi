@@ -276,6 +276,26 @@ test("resolveRddModeStatus promptly preserves a caller abort as the first abort"
 	assert.equal(received.reason, callerReason, "the first abort reason must win");
 });
 
+test("resolveRddModeStatus does not invoke or memoize a read with a pre-aborted caller signal", async () => {
+	clearRddStatusMemoForTesting();
+	const caller = new AbortController();
+	caller.abort(new Error("caller cancelled before invocation"));
+	let calls = 0;
+	const cli = {
+		reviewMode: ({ signal }: NativeReviewModeRequest): Promise<NativeReviewModeResult> => {
+			calls += 1;
+			return signal!.aborted
+				? Promise.reject(signal!.reason)
+				: Promise.resolve(modeResult("on", NATIVE_REVIEW_MODE_SOURCE.GLOBAL));
+		},
+	};
+	const cwd = "/repo-pre-aborted-no-memo";
+	assert.equal(await resolveSharedRddModeStatus(cli, cwd, caller.signal), undefined);
+	assert.equal(calls, 0, "a pre-aborted read must not invoke reviewMode");
+	assert.equal((await resolveSharedRddModeStatus(cli, cwd))?.effective, "on");
+	assert.equal(calls, 1, "the following live read must not receive cached undefined");
+});
+
 test("resolveRddModeStatus does not memoize a caller-aborted read", async () => {
 	clearRddStatusMemoForTesting();
 	const caller = new AbortController();

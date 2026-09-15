@@ -88,6 +88,7 @@ export async function resolveRddModeStatus(
 	now: () => number = Date.now,
 	timeoutSignal: AbortSignal = AbortSignal.timeout(RDD_STATUS_TIMEOUT_MS),
 ): Promise<RddModeStatus | undefined> {
+	if (signal?.aborted) return undefined;
 	const nowMs = now();
 	const cached = memo.get(cwd);
 	if (cached && cached.expiresAt > nowMs) return cached.status;
