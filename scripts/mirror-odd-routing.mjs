@@ -89,6 +89,31 @@ export function renderOddRoutingFixture(block, { sourceCommit, generatedAt }) {
 	return `${header}\n${body}`;
 }
 
+// `git status --porcelain --untracked-files=no` emits one `XY PATH` line per
+// modified tracked file. Extract just the repository-relative path so the
+// fail-closed error can name what would make provenance unverifiable.
+export function parsePorcelainPaths(porcelainOutput) {
+	return porcelainOutput
+		.split("\n")
+		.map((line) => (line.endsWith("\r") ? line.slice(0, -1) : line))
+		.filter((line) => line.length > 0)
+		.map((line) => line.slice(3).trim())
+		.filter((path) => path.length > 0);
+}
+
+// Fail closed when the checkout carries uncommitted changes to tracked files.
+// The fixture header asserts the rendered block came from the committed tree;
+// rendering a dirty tree under that claim would make the provenance a lie.
+// Untracked files never reach this guard because the git call excludes them.
+export function assertCleanGentleAiCheckout(porcelainOutput) {
+	const dirtyPaths = parsePorcelainPaths(porcelainOutput);
+	if (dirtyPaths.length > 0) {
+		throw new Error(
+			`gentle-ai checkout is dirty; provenance would be unverifiable: ${dirtyPaths.join(", ")}. Commit or stash first.`,
+		);
+	}
+}
+
 function parseArguments(argv) {
 	const values = { gentleAi: undefined };
 	for (let index = 0; index < argv.length; index += 2) {
@@ -141,17 +166,26 @@ export function renderCanonicalRouting(gentleAiRoot) {
 	}
 }
 
-function sourceCommit(gentleAiRoot) {
-	return execFileSync("git", ["rev-parse", "HEAD"], { cwd: gentleAiRoot, encoding: "utf8" }).trim();
+// Resolve fixture provenance from the committed gentle-ai tree. `generatedAt`
+// is the committer date, not wall-clock time, so rendering the same commit
+// twice yields byte-identical fixture files. `execGit` is injectable for tests.
+export function resolveOddRoutingProvenance(gentleAiRoot, execGit) {
+	const git = execGit ?? ((args) => execFileSync("git", args, { cwd: gentleAiRoot, encoding: "utf8" }));
+	assertCleanGentleAiCheckout(git(["status", "--porcelain", "--untracked-files=no"]));
+	return {
+		sourceCommit: git(["rev-parse", "HEAD"]).trim(),
+		generatedAt: git(["show", "-s", "--format=%cI", "HEAD"]).trim(),
+	};
 }
 
-export function mirrorOddRouting(packageRoot, gentleAiRoot, { now = new Date() } = {}) {
+export function mirrorOddRouting(packageRoot, gentleAiRoot) {
 	requireGentleAiCheckout(gentleAiRoot);
+	// Resolve (and fail closed on dirty) provenance BEFORE rendering: the
+	// transient Go entrypoint must not run against a tree whose commit hash the
+	// fixture would misrepresent.
+	const provenance = resolveOddRoutingProvenance(gentleAiRoot);
 	const block = renderCanonicalRouting(gentleAiRoot);
-	const contents = renderOddRoutingFixture(block, {
-		sourceCommit: sourceCommit(gentleAiRoot),
-		generatedAt: now.toISOString(),
-	});
+	const contents = renderOddRoutingFixture(block, provenance);
 
 	const fixturePath = join(resolve(packageRoot), ...ODD_ROUTING_FIXTURE_RELATIVE.split("/"));
 	const previous = readPreviousFixture(fixturePath);

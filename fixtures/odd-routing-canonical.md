@@ -2,7 +2,7 @@
 source_repo: https://github.com/Gentleman-Programming/gentle-ai
 source_path: internal/components/agentguidance/routing.go
 source_commit: e7729359fd9d6cb691ed2a88e8f72b1372f7c92e
-generated_at: 2026-09-18T11:58:20.516Z
+generated_at: 2026-09-18T13:49:03+02:00
 block_sha256: 16eaa3031d7dd0d7b91e0095d4761d7fc85a1f4a8c596c5f2cfe754213d7aba6
 -->
 ## Implementation Routing

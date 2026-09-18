@@ -3,10 +3,14 @@ import { existsSync, readFileSync } from "node:fs";
 import { join } from "node:path";
 import test from "node:test";
 import {
+	ODD_ROUTING_BLOCK_PREFIX,
 	ODD_ROUTING_FIXTURE_RELATIVE,
 	ODD_ROUTING_SOURCE_PATH,
 	ODD_ROUTING_SOURCE_REPO,
+	assertCleanGentleAiCheckout,
 	parseOddRoutingFixture,
+	renderOddRoutingFixture,
+	resolveOddRoutingProvenance,
 	sha256Hex,
 } from "../scripts/mirror-odd-routing.mjs";
 
@@ -205,4 +209,85 @@ test("the always-on core prompt carries the condensed incident and verification 
 	for (const row of CORE_ONLY_TRIGGERS) {
 		assert.ok(core.includes(row), `assets/orchestrator.md is missing condensed trigger row: ${JSON.stringify(row)}`);
 	}
+});
+
+// ---------------------------------------------------------------------------
+// 4 — Regeneration provenance: idempotent and fail-closed
+// ---------------------------------------------------------------------------
+
+// The fixture header claims provenance from the source commit, so regeneration
+// must be byte-reproducible: the same gentle-ai commit must not produce a
+// date-only diff. `generated_at` therefore tracks the source commit's committer
+// date instead of wall-clock time.
+test("fixture rendering is idempotent and derives generated_at from the source commit", () => {
+	const sourceCommit = "e7729359fd9d6cb691ed2a88e8f72b1372f7c92e";
+	const committerDate = "2026-09-18T13:49:03+02:00";
+	const fakeGit = (args: readonly string[]): string => {
+		switch (args[0]) {
+			case "status":
+				return "";
+			case "rev-parse":
+				return `${sourceCommit}\n`;
+			case "show":
+				return `${committerDate}\n`;
+			default:
+				throw new Error(`unexpected git invocation: ${args.join(" ")}`);
+		}
+	};
+	const block = `${ODD_ROUTING_BLOCK_PREFIX}\n\n- a canonical clause\n`;
+	const first = renderOddRoutingFixture(block, resolveOddRoutingProvenance("/fake/gentle-ai", fakeGit));
+	const second = renderOddRoutingFixture(block, resolveOddRoutingProvenance("/fake/gentle-ai", fakeGit));
+	assert.equal(first, second, "rendering the same source commit twice must be byte-identical");
+	const { header } = parseOddRoutingFixture(first);
+	assert.equal(header.source_commit, sourceCommit);
+	assert.equal(
+		header.generated_at,
+		committerDate,
+		"generated_at must track the source commit's committer date, not wall-clock time",
+	);
+});
+
+// A dirty checkout would render uncommitted content under the committed
+// provenance claim, so the mirror fails closed before rendering and names the
+// tracked paths. Untracked files (the odd/tasks notes) must never block.
+test("the mirror fails closed on a dirty source checkout and names the tracked paths", () => {
+	const recordedCalls: string[][] = [];
+	const cleanGit = (args: readonly string[]): string => {
+		recordedCalls.push([...args]);
+		switch (args[0]) {
+			case "status":
+				return "";
+			case "rev-parse":
+				return `${"a".repeat(40)}\n`;
+			case "show":
+				return "2026-09-18T13:49:03+02:00\n";
+			default:
+				throw new Error(`unexpected git invocation: ${args.join(" ")}`);
+		}
+	};
+	resolveOddRoutingProvenance("/fake/gentle-ai", cleanGit);
+	assert.deepEqual(
+		recordedCalls.find((args) => args[0] === "status"),
+		["status", "--porcelain", "--untracked-files=no"],
+		"the dirty guard must ignore untracked files",
+	);
+
+	assert.doesNotThrow(() => assertCleanGentleAiCheckout(""));
+	const dirtyGit = (args: readonly string[]): string => {
+		if (args[0] === "status") {
+			return " M internal/components/agentguidance/routing.go\n M scripts/other.mjs\n";
+		}
+		throw new Error(`unexpected git invocation: ${args.join(" ")}`);
+	};
+	assert.throws(
+		() => resolveOddRoutingProvenance("/fake/gentle-ai", dirtyGit),
+		(error: unknown) => {
+			assert.ok(error instanceof Error);
+			assert.match(
+				error.message,
+				/gentle-ai checkout is dirty; provenance would be unverifiable: internal\/components\/agentguidance\/routing\.go, scripts\/other\.mjs\. Commit or stash first\./,
+			);
+			return true;
+		},
+	);
 });
