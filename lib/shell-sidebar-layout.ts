@@ -15,6 +15,7 @@ type LayoutRoot = Component & { [NODE]?: () => LayoutNode };
 type Host = TUI & { mode?: string; layoutRoot?: LayoutRoot };
 type SidebarCache = { revision: number };
 type RailHit = { key: string; component: Component; startY: number; height: number; width: number };
+type SectionCacheEntry = { component: Component; digest: string | undefined; revision: number; contentWidth: number; theme: ShellBarTheme; lines: string[] };
 type SidebarPresentation = { scrollTop: number; output: LayoutNode };
 type PreparedRail = {
 	revision: number;
@@ -28,6 +29,11 @@ type PreparedRail = {
 	active: boolean;
 	lines: string[];
 	hits: RailHit[];
+	// The header row is a full-width sibling above the hstack, not a rail
+	// section: it never enters `lines`/`hits`, and an empty/blank result
+	// falls back to the old hstack-direct shape with the banner restored.
+	headerLines: string[];
+	headerActive: boolean;
 	presentation?: SidebarPresentation;
 };
 const CACHE = Symbol.for("gentle-pi.experimental-sidebar.cache");
@@ -66,7 +72,15 @@ export function installSidebar(tui: TUI, theme: ShellBarTheme): () => void {
 	let stopped = false;
 	let failed = false;
 	let railLines: string[] = [];
+	let headerLines: string[] = [];
 	let prepared: PreparedRail | undefined;
+	// One rendered-lines cache per rail section key, independent of the
+	// whole-rail `prepared` memo below: a section with its own digest is
+	// revalidated by that digest alone, so a sibling's ticking digest (the
+	// header/Status counters) never forces Agents or TODO to re-render. A
+	// section with no digest (or a throwing one) falls back to the shared
+	// revision counter, exactly like the whole-rail memo already did.
+	const sectionCache = new Map<string, SectionCacheEntry>();
 	state.active = false;
 	state.ownsHost = () => !stopped && host.mode === "fullscreen" && !!host.layoutRoot && roots.has(host.layoutRoot);
 	const rail: Component = {
@@ -75,6 +89,19 @@ export function installSidebar(tui: TUI, theme: ShellBarTheme): () => void {
 			invalidateSidebar(tui);
 			for (const part of state.parts.values()) part.invalidate();
 		},
+	};
+	// The header row: a plain leaf component, one line tall, painted above the
+	// hstack when a "header" part is registered and has something to show.
+	// The header is not inside the rail's ScrollView, so it never goes through
+	// dispatchPartMouse: it is its own leaf in the layout tree (no [NODE]),
+	// and pi-tui's mouse dispatch (tui-alt-screen.js dispatchMouseToLayout)
+	// finds and calls handleMouse on whatever leaf box is under the pointer
+	// directly, without any wiring of our own. Delegate straight to whatever
+	// the registered "header" part declares.
+	const header: Component = {
+		render: () => headerLines,
+		invalidate() {},
+		handleMouse: (event) => state.parts.get("header")?.handleMouse?.(event),
 	};
 	const scroll = new ScrollView(rail, {
 		follow: "none",
@@ -133,14 +160,33 @@ export function installSidebar(tui: TUI, theme: ShellBarTheme): () => void {
 			return prepared.active;
 		}
 		try {
+			// The header is a full-width sibling row, not a rail section: it reads
+			// the whole terminal width, never the 50-column rail's content width.
+			const headerPart = state.parts.get("header");
+			const preparedHeaderLines = [...(headerPart?.render(width) ?? [])];
+			const headerActive = headerPart !== undefined && preparedHeaderLines.some((line) => line.trim() !== "");
 			const contentWidth = scroll.getContentWidth(RAIL_WIDTH);
 			const sections = ["footer", "agents", "todo"].map((key) => {
 				const component = state.parts.get(key);
-				const lines = [...(component?.render(contentWidth - RAIL_PADDING * 2) ?? [])];
-				while (lines.length && lines[lines.length - 1]?.trim() === "") lines.pop();
+				if (!component) {
+					sectionCache.delete(key);
+					return { key, component, lines: [] as string[] };
+				}
+				const digest = railDigest(component);
+				const existing = sectionCache.get(key);
+				const reusable = existing?.component === component && existing.contentWidth === contentWidth && existing.theme === theme &&
+					(digest !== undefined ? existing.digest === digest : existing.digest === undefined && existing.revision === cache.revision);
+				const lines = reusable ? existing.lines : (() => {
+					const rendered = [...(component.render(contentWidth - RAIL_PADDING * 2) ?? [])];
+					while (rendered.length && rendered[rendered.length - 1]?.trim() === "") rendered.pop();
+					return rendered;
+				})();
+				sectionCache.set(key, { component, digest, revision: cache.revision, contentWidth, theme, lines });
 				return { key, component, lines };
 			}).filter((section) => section.component !== undefined && section.lines.length > 0) as Array<{ key: string; component: Component; lines: string[] }>;
-			const branding = renderSidebarBanner(theme, contentWidth - RAIL_PADDING * 2);
+			// The header carries the brand once it is active; the banner is the
+			// rail's fallback identity when no header is wired up.
+			const branding = headerActive ? [] : renderSidebarBanner(theme, contentWidth - RAIL_PADDING * 2);
 			const hits: RailHit[] = [];
 			railLines = [];
 			if (sections.length && branding.length) {
@@ -154,7 +200,8 @@ export function installSidebar(tui: TUI, theme: ShellBarTheme): () => void {
 			}
 			// Height is owned by the native ScrollView, never by the transcript.
 			const active = railLines.length > 0 && railLines.every((line) => visibleWidth(line) <= contentWidth);
-			prepared = { revision: cache.revision, width, mode: host.mode, root, theme, parts, digests, contentWidth, active, lines: railLines, hits };
+			headerLines = active && headerActive ? preparedHeaderLines : [];
+			prepared = { revision: cache.revision, width, mode: host.mode, root, theme, parts, digests, contentWidth, active, lines: railLines, hits, headerLines, headerActive: headerLines.length > 0 };
 			state.active = active;
 			return active;
 		} catch {
@@ -175,17 +222,29 @@ export function installSidebar(tui: TUI, theme: ShellBarTheme): () => void {
 			// Its intrinsic-height probe is unused; real painting traverses NODE.
 			// Delegating that probe to root.render would render the transcript twice.
 			const left = { render: () => [], invalidate() {}, [NODE]: () => original.call(root) };
+			// Stable component wrapping the [left, scroll] hstack behind its own
+			// NODE, exactly like `left` wraps the native transcript: the header
+			// vstack's second entry recurses into it the same way pi-tui already
+			// recurses into a nested layout via [NODE].
+			const hstackHost: Component & { [NODE](): LayoutNode } = {
+				render: () => [],
+				invalidate() {},
+				[NODE]: () => ({ type: "hstack", gap: GAP, align: "stretch", entries: [
+					{ component: left, basis: 0, grow: 1, shrink: 1, minSize: 1 },
+					{ component: scroll, basis: RAIL_WIDTH, grow: 0, shrink: 0, minSize: RAIL_WIDTH },
+				] }),
+			};
 			const replacement = () => {
 				if (!prepare(tui.terminal.columns, root)) return original.call(root);
 				const current = prepared!;
 				if (current.presentation?.scrollTop === scroll.scrollTop) return current.presentation.output;
-				return (current.presentation = {
-					scrollTop: scroll.scrollTop,
-					output: { type: "hstack", gap: GAP, align: "stretch", entries: [
-						{ component: left, basis: 0, grow: 1, shrink: 1, minSize: 1 },
-						{ component: scroll, basis: RAIL_WIDTH, grow: 0, shrink: 0, minSize: RAIL_WIDTH },
-					] },
-				}).output;
+				const output: LayoutNode = current.headerActive
+					? { type: "vstack", gap: 0, align: "stretch", entries: [
+						{ component: header, basis: 1, grow: 0, shrink: 0, minSize: 1 },
+						{ component: hstackHost, basis: 0, grow: 1, shrink: 1, minSize: 1 },
+					] }
+					: hstackHost[NODE]();
+				return (current.presentation = { scrollTop: scroll.scrollTop, output }).output;
 			};
 			root[NODE] = replacement;
 			roots.add(root);

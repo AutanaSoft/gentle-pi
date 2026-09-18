@@ -5,8 +5,8 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
 import { initTheme, type ExtensionAPI, type ExtensionContext, type SlashCommandInfo, type SourceInfo } from "@earendil-works/pi-coding-agent";
-import type { TUI } from "@earendil-works/pi-tui";
-import installGentleShell, { buildShellBarModel, createActiveProfileReader, changesShortcut, devBinaryCard, fetchCodexUsage, fetchNanUsage, loadFileDiff, shellGitRunner, openInExternalEditor, type GentlePromptEditor } from "../extensions/gentle-shell.ts";
+import type { TUI, TuiMouseEvent } from "@earendil-works/pi-tui";
+import installGentleShell, { buildShellBarModel, createActiveProfileReader, changesShortcut, devBinaryCard, fetchCodexUsage, fetchNanUsage, loadFileDiff, shellGitRunner, openInExternalEditor, usageShortcut, type GentlePromptEditor } from "../extensions/gentle-shell.ts";
 import { CHANGE_STATUS } from "../lib/shell-changes.ts";
 import { sidebarState, type SidebarRail } from "../lib/shell-sidebar.ts";
 import type { ShellBarTheme } from "../lib/shell-bar.ts";
@@ -253,12 +253,11 @@ test("gentleShell installs the footer on session_start when a UI exists", () => 
 	assert.match(lines[0], /main ⟡ gpt-5\.5 · medium/);
 });
 
-test("the fullscreen Status rail carries a live digest so a model switch refreshes it", async () => {
+test("the fullscreen Status rail carries a live digest so a profile switch refreshes it", async () => {
 	const { pi, handlers } = fakePi();
 	let profile: string | undefined = "team";
 	gentleShell(pi, { GENTLE_PI_SHELL_CHANGES_WATCH_MS: "off" }, { activeProfile: () => profile });
-	const entries: unknown[] = [];
-	const { ctx, ui } = fakeContext({ entries });
+	const { ctx, ui } = fakeContext();
 	await fire(handlers, "session_start", ctx);
 
 	const statuses = new Map<string, string>();
@@ -270,7 +269,7 @@ test("the fullscreen Status rail carries a live digest so a model switch refresh
 		const rail = sidebarState(tui as unknown as TUI).parts.get("footer") as SidebarRail;
 		const live = () => rail.digest?.();
 		assert.equal(typeof rail.digest, "function", "the Status card paints live state and must declare a digest");
-		assert.match(rail.render(46).join("\n"), /gpt-5\.5/);
+		assert.doesNotMatch(rail.render(46).join("\n"), /gpt-5\.5/, "model now lives in the header, not the Status card");
 
 		assert.match(rail.render(46).join("\n"), /Profile.*team/);
 		const beforeProfile = live();
@@ -280,26 +279,79 @@ test("the fullscreen Status rail carries a live digest so a model switch refresh
 		profile = undefined;
 		assert.doesNotMatch(rail.render(46).join("\n"), /Profile/);
 
-		const beforeModel = live();
-		(ctx.model as { id: string }).id = "gpt-5.6";
-		assert.notEqual(live(), beforeModel, "/model must change the digest");
-		assert.match(rail.render(46).join("\n"), /gpt-5\.6/);
-
-		const beforeUsage = live();
-		(ctx as unknown as { getContextUsage: () => unknown }).getContextUsage = () => ({ tokens: 200_000, contextWindow: 272_000, percent: 74 });
-		assert.notEqual(live(), beforeUsage, "context usage must change the digest");
-		assert.match(rail.render(46).join("\n"), /74%/);
-
-		const beforeCost = live();
-		entries.push(assistantEntry({ input: 100, output: 20, cost: 0.42 }));
-		assert.notEqual(live(), beforeCost, "session cost must change the digest");
-		assert.match(rail.render(46).join("\n"), /\$0\.420/);
-
 		const beforeStatus = live();
 		statuses.set("mcp", "MCP: 3 servers enabled");
 		assert.notEqual(live(), beforeStatus, "extension statuses have no event and must change the digest");
 		assert.match(rail.render(46).join("\n"), /MCP: 3 servers enabled/);
 		assert.equal(live(), live(), "an unchanged digest still reuses the prepared rail");
+	} finally {
+		component.dispose();
+	}
+});
+
+test("the fullscreen header rail carries a live digest so model, context, and cost changes refresh it", async () => {
+	const { pi, handlers } = fakePi();
+	gentleShell(pi, { GENTLE_PI_SHELL_CHANGES_WATCH_MS: "off" });
+	const entries: unknown[] = [];
+	const { ctx, ui } = fakeContext({ entries });
+	await fire(handlers, "session_start", ctx);
+
+	const liveFooterData = { getGitBranch: () => "main", getExtensionStatuses: () => new Map([["mcp", "MCP: 3 servers enabled"]]), getAvailableProviderCount: () => 1, onBranchChange: () => () => {} };
+	const tui = { terminal: { rows: 40, columns: 160 }, requestRender() {} };
+	const factory = ui.footerFactory as (tui: unknown, theme: ShellBarTheme, footerData: unknown) => { render(width: number): string[]; dispose(): void };
+	const component = factory(tui, plainTheme, liveFooterData);
+	try {
+		const header = sidebarState(tui as unknown as TUI).parts.get("header") as SidebarRail;
+		assert.equal(typeof header.digest, "function", "the header paints live state every frame and must declare a digest");
+		const live = () => header.digest?.();
+		const text = () => header.render(160).join("\n");
+		assert.match(text(), /gpt-5\.5/);
+		assert.doesNotMatch(text(), /MCP: 3 servers/, "extension statuses never reach the header");
+		assert.doesNotMatch(text(), /working/i, "the working state never reaches the header");
+
+		const beforeModel = live();
+		(ctx.model as { id: string }).id = "gpt-5.6";
+		assert.notEqual(live(), beforeModel, "/model must change the header digest");
+		assert.match(text(), /gpt-5\.6/);
+
+		const beforeUsage = live();
+		(ctx as unknown as { getContextUsage: () => unknown }).getContextUsage = () => ({ tokens: 200_000, contextWindow: 272_000, percent: 74 });
+		assert.notEqual(live(), beforeUsage, "context usage must change the header digest");
+		assert.match(text(), /74%/);
+
+		const beforeCost = live();
+		entries.push(assistantEntry({ input: 100, output: 20, cost: 0.42 }));
+		assert.notEqual(live(), beforeCost, "session cost must change the header digest");
+		assert.match(text(), /\$0\.420/);
+		assert.equal(live(), live(), "an unchanged digest still reuses the prepared header");
+	} finally {
+		component.dispose();
+	}
+});
+
+test("clicking the header's usage segment opens the usage panel; other header clicks are ignored", async () => {
+	const { pi, handlers } = fakePi();
+	gentleShell(pi, { GENTLE_PI_SHELL_CHANGES_WATCH_MS: "off" });
+	const { ctx, ui } = fakeContext();
+	await fire(handlers, "session_start", ctx);
+
+	const liveFooterData = { getGitBranch: () => "main", getExtensionStatuses: () => new Map(), getAvailableProviderCount: () => 1, onBranchChange: () => () => {} };
+	const tui = { terminal: { rows: 40, columns: 160 }, requestRender() {} };
+	const factory = ui.footerFactory as (tui: unknown, theme: ShellBarTheme, footerData: unknown) => { render(width: number): string[]; dispose(): void };
+	const component = factory(tui, plainTheme, liveFooterData);
+	try {
+		const header = sidebarState(tui as unknown as TUI).parts.get("header") as SidebarRail;
+		const line = header.render(160).join("");
+		const usageAt = line.indexOf("usage");
+		assert.ok(usageAt >= 0, "the header shows a standing usage segment");
+
+		const click = (x: number) => header.handleMouse?.({ type: "click", button: "left", x, y: 0, screenX: x, screenY: 0, width: 160, height: 1, shift: false, alt: false, ctrl: false } as TuiMouseEvent);
+		assert.equal(click(0), undefined, "a click on the brand does not open the panel");
+		const hit = click(usageAt + 1);
+		assert.equal(hit?.handled, true);
+		await new Promise((resolve) => setTimeout(resolve, 0));
+		assert.match(ui.overlayView!.render(90).join("\n"), /Subscriptions/);
+		ui.closeOverlay?.();
 	} finally {
 		component.dispose();
 	}
@@ -891,6 +943,32 @@ test("gentleShell registers /gentle:usage and opens the subscriptions overlay", 
 	await opened;
 });
 
+test("usageShortcut defaults to alt+u and can be overridden or disabled", () => {
+	assert.equal(usageShortcut({}), "alt+u");
+	assert.equal(usageShortcut({ GENTLE_PI_SHELL_USAGE_KEY: "ctrl+shift+u" }), "ctrl+shift+u");
+	assert.equal(usageShortcut({ GENTLE_PI_SHELL_USAGE_KEY: "off" }), undefined);
+	assert.equal(usageShortcut({ GENTLE_PI_SHELL_USAGE_KEY: "" }), undefined);
+});
+
+test("gentleShell binds the usage shortcut to the same handler as /gentle:usage", async () => {
+	const { pi, handlers, shortcuts } = fakePi();
+	gentleShell(pi, { GENTLE_PI_SHELL_CHANGES_WATCH_MS: "off" }, { fetch: fakeFetch().fetchFn, now: () => 1_788_600_000_000 });
+	const { ctx, ui } = fakeContext({ token: JWT });
+	await fire(handlers, "session_start", ctx);
+	const shortcut = shortcuts.get("alt+u");
+	assert.ok(shortcut, "alt+u not registered");
+	const opened = shortcut.handler(ctx);
+	await new Promise((resolve) => setTimeout(resolve, 0));
+	const plain = ui.overlayView!.render(90).map(stripAnsi);
+	assert.match(plain[0], /Subscriptions/);
+	ui.closeOverlay?.();
+	await opened;
+
+	const silent = fakePi();
+	gentleShell(silent.pi, { GENTLE_PI_SHELL_USAGE_KEY: "off" });
+	assert.equal(silent.shortcuts.has("alt+u"), false, "the usage shortcut must not register when disabled");
+});
+
 test("gentleShell draws the review preflight message as a Gentle card", () => {
 	const { pi } = fakePi();
 	gentleShell(pi, {});
@@ -907,6 +985,17 @@ test("gentleShell draws the review preflight message as a Gentle card", () => {
 	assert.ok(expanded.some((line) => line.includes("gentle_review")));
 	const collapsed = renderer({ ...message, content: [{ type: "text", text: message.content }] }, { expanded: false }, plainTheme).render(80).map(stripAnsi);
 	assert.equal(collapsed.length, 3);
+});
+
+test("the review preflight card paints the rose INFO frame (border) and title (accent)", () => {
+	const { pi } = fakePi();
+	gentleShell(pi, {});
+	const renderer = renderers.get("gentle-pi.review-preflight")!;
+	const taggedTheme = { ...plainTheme, fg: (color: string, text: string) => `<${color}>${text}</${color}>` };
+	const message = { customType: "gentle-pi.review-preflight", content: "Receipt-driven development is enabled." };
+	const lines = renderer(message, { expanded: true }, taggedTheme).render(60);
+	assert.match(lines[0]!, /^<border>╭<\/border>/);
+	assert.match(lines[0]!, /<accent>✿ Gentle AI<\/accent>/);
 });
 
 test("gentleShell keeps a dev-binary override visible above the editor for the whole session", async () => {
