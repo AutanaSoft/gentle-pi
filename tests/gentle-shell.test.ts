@@ -10,6 +10,7 @@ import installGentleShell, { buildShellBarModel, createActiveProfileReader, chan
 import { CHANGE_STATUS } from "../lib/shell-changes.ts";
 import { sidebarState, type SidebarRail } from "../lib/shell-sidebar.ts";
 import type { ShellBarTheme } from "../lib/shell-bar.ts";
+import { localProfilePinPath, repoProfileDeclarationPath, serializeProfilePin } from "../lib/agent-profile-pin.ts";
 import { stripAnsi } from "../lib/terminal-theme.ts";
 
 // The Gentle Shell extension wires the pure bar renderer into pi's footer
@@ -206,8 +207,9 @@ test("buildShellBarModel reads session, model, and footer data", () => {
 		getAvailableProviderCount: () => 1,
 		onBranchChange: () => () => {},
 	};
-	const built = buildShellBarModel(pi, ctx, footerData, { home: "/home/alan" });
+	const built = buildShellBarModel(pi, ctx, footerData, { home: "/home/alan", profile: { name: "team", pinned: true } });
 	assert.equal(built.cwd, "/repo");
+	assert.deepEqual(built.profile, { name: "team", pinned: true });
 	assert.equal(built.branch, "main");
 	assert.equal(built.sessionName, "Release notes");
 	assert.equal(built.modelId, "gpt-5.5");
@@ -255,7 +257,7 @@ test("gentleShell installs the footer on session_start when a UI exists", () => 
 
 test("the fullscreen Status rail carries a live digest so a model switch refreshes it", async () => {
 	const { pi, handlers } = fakePi();
-	let profile: string | undefined = "team";
+	let profile: { name: string; pinned: boolean } | undefined = { name: "team", pinned: false };
 	gentleShell(pi, { GENTLE_PI_SHELL_CHANGES_WATCH_MS: "off" }, { activeProfile: () => profile });
 	const entries: unknown[] = [];
 	const { ctx, ui } = fakeContext({ entries });
@@ -274,7 +276,7 @@ test("the fullscreen Status rail carries a live digest so a model switch refresh
 
 		assert.match(rail.render(46).join("\n"), /Profile.*team/);
 		const beforeProfile = live();
-		profile = "other";
+		profile = { name: "other", pinned: false };
 		assert.notEqual(live(), beforeProfile);
 		assert.match(rail.render(46).join("\n"), /Profile.*other/);
 		profile = undefined;
@@ -305,27 +307,63 @@ test("the fullscreen Status rail carries a live digest so a model switch refresh
 	}
 });
 
+test("fullscreen Status digest follows repository pin changes without restarting the shell", async (t) => {
+	const root = mkdtempSync(join(tmpdir(), "shell-status-pin-"));
+	t.after(() => rmSync(root, { recursive: true, force: true }));
+	const worktreeRoot = join(root, "repo");
+	const commonDir = join(root, "clone");
+	const resolveWorktree = () => ({ root: worktreeRoot, commonDir });
+	mkdirSync(join(worktreeRoot, ".pi", "gentle-ai"), { recursive: true });
+	mkdirSync(join(commonDir, "gentle-ai"), { recursive: true });
+	writeFileSync(join(root, "profiles.json"), JSON.stringify({
+		kind: "gentle-pi.agent_model_profiles", version: 1, active: "team", profiles: { team: {}, other: {} },
+	}));
+	const repoPin = repoProfileDeclarationPath(worktreeRoot);
+	const { pi, handlers } = fakePi();
+	gentleShell(pi, { GENTLE_PI_CONFIG_HOME: root, GENTLE_PI_SHELL_CHANGES_WATCH_MS: "off" }, { resolveWorktree });
+	const { ctx, ui } = fakeContext();
+	await fire(handlers, "session_start", ctx);
+	const factory = ui.footerFactory as (tui: unknown, theme: ShellBarTheme, footerData: unknown) => { render(width: number): string[]; dispose(): void };
+	const tui = { terminal: { rows: 40, columns: 160 }, requestRender() {} };
+	const component = factory(tui, plainTheme, { getGitBranch: () => "main", getExtensionStatuses: () => new Map(), getAvailableProviderCount: () => 1, onBranchChange: () => () => {} });
+	try {
+		const rail = sidebarState(tui as unknown as TUI).parts.get("footer") as SidebarRail;
+		assert.match(rail.render(46).join("\n"), /Profile.*team/);
+		const beforePin = rail.digest!();
+		writeFileSync(repoPin, serializeProfilePin("other"));
+		assert.notEqual(rail.digest!(), beforePin, "creating a pin must invalidate the Status digest");
+		assert.match(rail.render(46).join("\n"), /Profile.*other \(pinned\)/);
+		const beforeRemoval = rail.digest!();
+		rmSync(repoPin);
+		assert.notEqual(rail.digest!(), beforeRemoval, "removing a pin must invalidate the Status digest");
+		assert.match(rail.render(46).join("\n"), /Profile.*team/);
+		assert.doesNotMatch(rail.render(46).join("\n"), /\(pinned\)/);
+	} finally {
+		component.dispose();
+	}
+});
+
 test("profile reader follows store changes and rejects missing or invalid active markers", (t) => {
 	const root = mkdtempSync(join(tmpdir(), "shell-profile-"));
 	t.after(() => rmSync(root, { recursive: true, force: true }));
 	const path = join(root, "profiles.json");
-	const read = createActiveProfileReader({ GENTLE_PI_CONFIG_HOME: root });
+	const read = createActiveProfileReader({ GENTLE_PI_CONFIG_HOME: root }, () => undefined);
 	const save = (active: string | undefined) => writeFileSync(path, JSON.stringify({
 		kind: "gentle-pi.agent_model_profiles", version: 1, active, profiles: { team: {}, other: {} },
 	}));
 	assert.equal(read(), undefined);
 	save("team");
-	assert.equal(read(), "team");
-	assert.equal(read(), "team");
+	assert.deepEqual(read(), { name: "team", pinned: false });
+	assert.deepEqual(read(), { name: "team", pinned: false });
 	save("other");
-	assert.equal(read(), "other");
+	assert.deepEqual(read(), { name: "other", pinned: false });
 	const replacement = join(root, "replacement.json");
 	writeFileSync(replacement, JSON.stringify({ kind: "gentle-pi.agent_model_profiles", version: 1, active: "team", profiles: { team: {} } }));
 	renameSync(replacement, path);
-	assert.equal(read(), "team", "atomic replacement refreshes the cached profile");
+	assert.deepEqual(read(), { name: "team", pinned: false }, "atomic replacement refreshes the cached profile");
 	const isolated = createActiveProfileReader({ GENTLE_PI_CONFIG_HOME: join(root, "other-home") });
 	assert.equal(isolated(), undefined);
-	assert.equal(read(), "team", "another shell's config home does not alter this cache");
+	assert.deepEqual(read(), { name: "team", pinned: false }, "another shell's config home does not alter this cache");
 	save("missing");
 	assert.equal(read(), undefined);
 	save(undefined);
@@ -333,9 +371,43 @@ test("profile reader follows store changes and rejects missing or invalid active
 	writeFileSync(path, "{broken");
 	assert.equal(read(), undefined);
 	save("team");
-	assert.equal(read(), "team");
+	assert.deepEqual(read(), { name: "team", pinned: false });
 	rmSync(path);
 	assert.equal(read(), undefined);
+});
+
+test("profile reader shows the effective pin and refreshes when pins change", (t) => {
+	const root = mkdtempSync(join(tmpdir(), "shell-profile-pin-"));
+	t.after(() => rmSync(root, { recursive: true, force: true }));
+	const worktreeRoot = join(root, "repo");
+	const commonDir = join(root, "clone");
+	const resolveWorktree = () => ({ root: worktreeRoot, commonDir });
+	const read = createActiveProfileReader({ GENTLE_PI_CONFIG_HOME: root }, resolveWorktree);
+	const profilesPath = join(root, "profiles.json");
+	const save = (active: string) => writeFileSync(profilesPath, JSON.stringify({
+		kind: "gentle-pi.agent_model_profiles", version: 1, active, profiles: { team: {}, other: {} },
+	}));
+	const repoPin = repoProfileDeclarationPath(worktreeRoot);
+	const localPin = localProfilePinPath(commonDir);
+	mkdirSync(join(worktreeRoot, ".pi", "gentle-ai"), { recursive: true });
+	mkdirSync(join(commonDir, "gentle-ai"), { recursive: true });
+
+	save("team");
+	assert.deepEqual(read(worktreeRoot), { name: "team", pinned: false });
+	writeFileSync(repoPin, serializeProfilePin("other"));
+	assert.deepEqual(read(worktreeRoot), { name: "other", pinned: true });
+	writeFileSync(repoPin, serializeProfilePin("team"));
+	assert.deepEqual(read(worktreeRoot), { name: "team", pinned: true }, "changed pins invalidate the reader cache");
+	rmSync(repoPin);
+	assert.deepEqual(read(worktreeRoot), { name: "team", pinned: false }, "removed pins fall back to the global active profile");
+	writeFileSync(repoPin, serializeProfilePin("missing"));
+	assert.deepEqual(read(worktreeRoot), { name: "team", pinned: false }, "stale pins fall back globally");
+	writeFileSync(repoPin, "{broken");
+	assert.deepEqual(read(worktreeRoot), { name: "team", pinned: false }, "invalid pins fall back globally");
+	writeFileSync(localPin, serializeProfilePin("other"));
+	assert.deepEqual(read(worktreeRoot), { name: "other", pinned: true }, "a valid local pin wins over the global profile");
+	rmSync(localPin);
+	assert.deepEqual(read(worktreeRoot), { name: "team", pinned: false });
 });
 
 test("gentleShell stays out of the way without a UI or when disabled", () => {

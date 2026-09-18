@@ -200,7 +200,7 @@ test("sidebar unifies project, captured changes, usage and integrations in one f
 test("sidebar profile wraps long names without changing the compact bar", () => {
 	const profile = "team-" + "x".repeat(59);
 	const base = model();
-	const active = model({ profile });
+	const active = model({ profile: { name: profile, pinned: false } });
 	for (const width of [24, 46]) {
 		const lines = renderShellSidebarBar(active, plainTheme, width);
 		assert.ok(lines.every((line) => visibleWidth(line) <= width));
@@ -208,4 +208,13 @@ test("sidebar profile wraps long names without changing the compact bar", () => 
 		assert.ok(lines.join("").replace(/[│\s]/g, "").includes(profile));
 	}
 	assert.deepEqual(renderShellBar(active, plainTheme, 120), renderShellBar(base, plainTheme, 120));
+});
+
+test("sidebar formats and sanitizes the pinned profile suffix", () => {
+	const pinned = model({ profile: { name: "other\x1b[31m", pinned: true } });
+	const sidebar = renderShellSidebarBar(pinned, plainTheme, 46).join("\n");
+	assert.match(sidebar, /Profile.*other \(pinned\)/);
+	assert.doesNotMatch(sidebar, /\x1b\[/);
+	const [compact] = renderShellBar(pinned, plainTheme, 120);
+	assert.doesNotMatch(compact, /other|pinned/);
 });

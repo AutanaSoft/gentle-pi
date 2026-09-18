@@ -792,6 +792,8 @@ For a given working directory the winner is the local pin, then the repository d
 
 In a pinned repository the pinned profile governs subagent launches: the agents it names take its model and effort, and the agents it omits return to inherit (their own definition, then the default model). The globally active profile and writes made through `/gentle:models` do not reach those launches, which `/gentle:models` reports when it runs inside a pinned repository. `enter` follows the same boundary: inside a pinned repository it re-pins that repository instead of writing the global routing, so the panel's main key can never move another repository's routing. The panel states which layer won, names the file that holds it, and marks the profile with `(pinned)`.
 
+The fullscreen Gentle Shell Status card shows the same effective profile in one `Profile` field: it adds `(pinned)` only when a valid local or repository pin wins, and otherwise shows the global active profile without a suffix. Invalid or stale pins therefore fall back globally. The compact bottom bar remains unchanged and does not show this field.
+
 To share a pin, commit the repository declaration. When `.pi/` is ignored, Git cannot re-include a nested file until its parent directories are visible. The panel therefore prints these ordered root `.gitignore` rules, which keep unrelated `.pi` content ignored while making only the declaration committable:
 
 ```gitignore

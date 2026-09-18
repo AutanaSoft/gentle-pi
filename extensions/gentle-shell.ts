@@ -3,9 +3,10 @@ import type { EditorTheme, TUI } from "@earendil-works/pi-tui";
 import { execFile, spawnSync } from "node:child_process";
 import { statSync } from "node:fs";
 import { profilesFilePath, readProfilesFileResult } from "../lib/agent-profiles.ts";
+import { localProfilePinPath, repoProfileDeclarationPath, resolveProfilePin } from "../lib/agent-profile-pin.ts";
 import * as os from "node:os";
 import { join } from "node:path";
-import { renderShellBar, renderShellSidebarBar, shellEnabled, type ShellBarModel, type ShellBarTheme } from "../lib/shell-bar.ts";
+import { renderShellBar, renderShellSidebarBar, shellEnabled, type ShellBarModel, type ShellBarTheme, type ShellProfileState } from "../lib/shell-bar.ts";
 import { CHANGE_STATUS, renderChangesWidget, type ChangedFile, type ChangesModel, type GitRunner, type WorktreeChanges } from "../lib/shell-changes.ts";
 import { WorktreeChangesView } from "../lib/shell-changes-view.ts";
 import { SessionWorktreeRegistry, resolveSessionWorktree, worktreeGitEnvironment, type WorktreeResolver } from "../lib/session-worktree-registry.ts";
@@ -45,7 +46,7 @@ interface ShellBarComponent {
 }
 
 interface BuildOptions {
-	profile?: string;
+	profile?: ShellProfileState;
 	home?: string;
 	dirty?: number;
 	usage?: ProviderUsage;
@@ -54,7 +55,7 @@ interface BuildOptions {
 export type DevBinaryNotice = { state: "active"; path: string; sha256: string } | { state: "invalid"; reason: string };
 
 export interface ShellDeps {
-	activeProfile(): string | undefined;
+	activeProfile(cwd?: string): ShellProfileState | undefined;
 	fetch: typeof fetch;
 	now(): number;
 	devBinary(): DevBinaryNotice | undefined;
@@ -63,27 +64,54 @@ export interface ShellDeps {
 }
 
 // The rail digest runs every frame. Cache parsing by file identity and metadata,
-// not just mtime: profile writes replace the store atomically. Keep the cache
+// not just mtime: profile and pin writes replace files atomically. Keep the cache
 // local to this shell instance and recheck on the next frame after panel edits.
-export function createActiveProfileReader(env: NodeJS.ProcessEnv = process.env): () => string | undefined {
-	const path = profilesFilePath(env.GENTLE_PI_CONFIG_HOME ?? join(os.homedir(), ".pi", "gentle-ai"));
+export function createActiveProfileReader(
+	env: NodeJS.ProcessEnv = process.env,
+	resolveWorktree: WorktreeResolver = resolveSessionWorktree,
+): (cwd?: string) => ShellProfileState | undefined {
+	const configHome = env.GENTLE_PI_CONFIG_HOME ?? join(os.homedir(), ".pi", "gentle-ai");
+	const profilesPath = profilesFilePath(configHome);
 	let fingerprint: string | undefined;
-	let name: string | undefined;
-	return () => {
+	let profile: ShellProfileState | undefined;
+	let identityCwd: string | undefined;
+	let identity: { root: string; commonDir: string } | undefined;
+	const fileFingerprint = (path: string): string => {
 		try {
 			const stat = statSync(path, { bigint: true });
-			const next = `${stat.dev}:${stat.ino}:${stat.size}:${stat.mtimeNs}:${stat.ctimeNs}`;
-			if (next !== fingerprint) {
-				const result = readProfilesFileResult(path);
-				name = result.status === "valid" ? result.file.active : undefined;
-				fingerprint = next;
-			}
-			return name;
+			return `present:${stat.dev}:${stat.ino}:${stat.size}:${stat.mtimeNs}:${stat.ctimeNs}`;
 		} catch {
-			fingerprint = undefined;
-			name = undefined;
-			return undefined;
+			return "missing";
 		}
+	};
+	return (cwd = process.cwd()) => {
+		if (cwd !== identityCwd) {
+			identityCwd = cwd;
+			try {
+				identity = resolveWorktree(cwd, cwd);
+			} catch {
+				identity = undefined;
+			}
+			fingerprint = undefined;
+		}
+		const pinPaths = identity
+			? [localProfilePinPath(identity.commonDir), repoProfileDeclarationPath(identity.root)]
+			: [];
+		const identityFingerprint = identity ? `${identity.root}:${identity.commonDir}` : "no-worktree";
+		const next = `${identityFingerprint}|${[profilesPath, ...pinPaths].map(fileFingerprint).join("|")}`;
+		if (next !== fingerprint) {
+			const resolution = resolveProfilePin({ cwd, configHome, resolveWorktree });
+			if (resolution) {
+				profile = { name: resolution.profile, pinned: true };
+			} else {
+				const result = readProfilesFileResult(profilesPath);
+				profile = result.status === "valid" && result.file.active
+					? { name: result.file.active, pinned: false }
+					: undefined;
+			}
+			fingerprint = next;
+		}
+		return profile;
 	};
 }
 
@@ -485,7 +513,11 @@ export async function fetchCodexUsage(token: string | undefined, fetchFn: typeof
 export default function gentleShell(pi: ExtensionAPI, env: NodeJS.ProcessEnv = process.env, overrides: Partial<ShellDeps> = {}): void {
 	installSessionChangeCapture(pi, env, overrides.resolveWorktree ?? resolveSessionWorktree);
 	if (!shellEnabled(env)) return;
-	const deps: ShellDeps = { ...defaultShellDeps, activeProfile: createActiveProfileReader(env), ...overrides };
+	const deps: ShellDeps = {
+		...defaultShellDeps,
+		activeProfile: createActiveProfileReader(env, overrides.resolveWorktree ?? defaultShellDeps.resolveWorktree),
+		...overrides,
+	};
 	const usage = new UsageStore();
 	let renderHost: ShellRenderHost | undefined;
 	let usageFetchedAt = 0;
@@ -586,7 +618,7 @@ export default function gentleShell(pi: ExtensionAPI, env: NodeJS.ProcessEnv = p
 			// statuses. The digest is what keeps the fullscreen memo honest, and it
 			// rebuilds the model exactly as the narrow bottom bar does every frame.
 			const footerModel = (): ShellBarModel => ({
-				...buildShellBarModel(pi, ctx, footerData, { dirty: tracker.model.files.length, usage: usage.get(ctx.model?.provider ?? ""), profile: deps.activeProfile() }),
+				...buildShellBarModel(pi, ctx, footerData, { dirty: tracker.model.files.length, usage: usage.get(ctx.model?.provider ?? ""), profile: deps.activeProfile(ctx.sessionManager.getCwd()) }),
 				changes: { files: tracker.model.files.length, added: tracker.model.added, deleted: tracker.model.deleted, notice: tracker.model.notice },
 			});
 			const part = sidebarPart(tui, "footer", bottom, {

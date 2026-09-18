@@ -10,8 +10,13 @@ export { gaugeTone, renderGauge, type GaugeTone };
 // three-line footer. Everything here is pure so the bar can be rendered and
 // verified without a live TUI.
 
+export interface ShellProfileState {
+	name: string;
+	pinned: boolean;
+}
+
 export interface ShellBarModel {
-	profile?: string;
+	profile?: ShellProfileState;
 	changes?: { files: number; added: number; deleted: number; notice?: string };
 	cwd: string;
 	branch: string | null;
@@ -79,6 +84,10 @@ function sanitizeStatus(text: string): string {
 	return sanitizeTerminalText(text.replace(/[\r\n\t]/g, " ")).replace(/ +/g, " ").trim();
 }
 
+function formatProfile(profile: ShellProfileState): string {
+	return sanitizeStatus(`${profile.name}${profile.pinned ? " (pinned)" : ""}`);
+}
+
 function buildSegments(model: ShellBarModel, theme: ShellBarTheme): string[] {
 	const dirty = model.dirty ? ` ${theme.fg(ROLE.DIRTY, `±${model.dirty}`)}` : "";
 	const location = model.branch
@@ -138,7 +147,7 @@ export function renderShellSidebarBar(model: ShellBarModel, theme: ShellBarTheme
 				...(model.sessionName ? [`${label("Session")} ${value(model.sessionName)}`] : []),
 				`${label("Model")} ${value(model.modelId)}`,
 				...(model.effort ? [`${label("Effort")} ${theme.fg(ROLE.EFFORT, model.effort)}`] : []),
-				...(model.profile ? [`${label("Profile")} ${value(sanitizeStatus(model.profile))}`] : []),
+				...(model.profile ? [`${label("Profile")} ${value(formatProfile(model.profile))}`] : []),
 			],
 		},
 		{
