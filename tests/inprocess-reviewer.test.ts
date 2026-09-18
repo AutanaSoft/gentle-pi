@@ -99,6 +99,26 @@ function signalAwaitingComplete(): typeof completeSimple {
 	}) as typeof completeSimple;
 }
 
+/**
+ * A `complete` fake that follows the pi-ai provider convention on abort:
+ * once the signal fires it RESOLVES an AssistantMessage carrying the text
+ * streamed so far and `stopReason: "aborted"`, instead of rejecting.
+ */
+function signalResolvingAbortedComplete(partialText = "partial revi"): typeof completeSimple {
+	return (async (_model, _context, options) => {
+		return await new Promise<AssistantMessage>((resolve) => {
+			const signal = options?.signal;
+			const settle = () => resolve(assistantText(partialText, { stopReason: "aborted" }));
+			if (signal === undefined) return;
+			if (signal.aborted) {
+				settle();
+				return;
+			}
+			signal.addEventListener("abort", settle, { once: true });
+		});
+	}) as typeof completeSimple;
+}
+
 /** A canary `complete` fake for refusals that must never reach the provider. */
 const unreachableComplete: typeof completeSimple = (async () => {
 	throw new Error("complete must not be called for this refusal");
@@ -183,15 +203,16 @@ test("refuses empty assistant text with stopReason evidence", async () => {
 	assert.deepEqual(refused.evidence, { stopReason: "stop" });
 });
 
-test("refuses empty assistant text and carries errorMessage evidence when present", async () => {
+test("refuses with PROVIDER_FAILED when the provider itself reports an aborted completion", async () => {
 	const assistant = assistantText("", { content: [], stopReason: "aborted", errorMessage: "provider aborted mid-turn" });
 	const outcome = await runInProcessReviewer(baseRequest(), {
 		registry: fakeRegistry([fakeModel()]),
-		complete: async () => assistant,
+		complete: (async () => assistant) as typeof completeSimple,
 	});
 	const refused = expectRefused(outcome);
-	assert.equal(refused.code, INPROCESS_REVIEWER_FAILURE.EMPTY_OUTPUT);
-	assert.deepEqual(refused.evidence, { stopReason: "aborted", errorMessage: "provider aborted mid-turn" });
+	assert.equal(refused.code, INPROCESS_REVIEWER_FAILURE.PROVIDER_FAILED);
+	assert.match(refused.message, /aborted/);
+	assert.match(refused.message, /provider aborted mid-turn/);
 });
 
 test("refuses output over the byte bound", async () => {
@@ -247,6 +268,27 @@ test("refuses with ABORTED when the caller's own signal aborts", async () => {
 	const outcome = await runInProcessReviewer(baseRequest({ timeoutMs: 5_000, signal: controller.signal }), {
 		registry: fakeRegistry([fakeModel()]),
 		complete: signalAwaitingComplete(),
+	});
+	const refused = expectRefused(outcome);
+	assert.equal(refused.code, INPROCESS_REVIEWER_FAILURE.ABORTED);
+});
+
+test("refuses with TIMED_OUT when the provider resolves an aborted message after the bound fires", async () => {
+	const outcome = await runInProcessReviewer(baseRequest({ timeoutMs: 20 }), {
+		registry: fakeRegistry([fakeModel()]),
+		complete: signalResolvingAbortedComplete(),
+	});
+	const refused = expectRefused(outcome);
+	assert.equal(refused.code, INPROCESS_REVIEWER_FAILURE.TIMED_OUT);
+	assert.match(refused.message, /20ms/);
+});
+
+test("refuses with ABORTED when the provider resolves partial text after the caller aborts", async () => {
+	const controller = new AbortController();
+	controller.abort();
+	const outcome = await runInProcessReviewer(baseRequest({ timeoutMs: 5_000, signal: controller.signal }), {
+		registry: fakeRegistry([fakeModel()]),
+		complete: signalResolvingAbortedComplete("truncated findings"),
 	});
 	const refused = expectRefused(outcome);
 	assert.equal(refused.code, INPROCESS_REVIEWER_FAILURE.ABORTED);

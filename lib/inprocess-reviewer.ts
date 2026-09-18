@@ -193,16 +193,38 @@ export async function runInProcessReviewer(request: InProcessReviewerRequest, de
 		...(reasoning.reasoning === undefined ? {} : { reasoning: reasoning.reasoning }),
 	};
 
+	// An abort is classified by which signal actually fired, never by the
+	// error's shape or the message's text, and the same classification serves
+	// both settlement paths: a provider may reject on abort, or — the pi-ai
+	// provider convention — resolve an AssistantMessage with `stopReason:
+	// "aborted"` carrying whatever text streamed before the cut. Either way a
+	// fired signal is a timeout or a caller abort, never empty or usable output.
+	const abortRefusal = (): InProcessReviewerOutcome | undefined => {
+		if (timeoutSignal.aborted) {
+			return refuse(INPROCESS_REVIEWER_FAILURE.TIMED_OUT, `Reviewer completion for ${request.routingKey} exceeded its ${request.timeoutMs}ms bound.`);
+		}
+		if (request.signal?.aborted === true) {
+			return refuse(INPROCESS_REVIEWER_FAILURE.ABORTED, `Reviewer completion for ${request.routingKey} was aborted by the caller.`);
+		}
+		return undefined;
+	};
+
 	let assistant: AssistantMessage;
 	try {
 		assistant = await deps.complete(model, context, options);
 	} catch (error) {
-		if (combinedSignal.aborted) {
-			return timeoutSignal.aborted
-				? refuse(INPROCESS_REVIEWER_FAILURE.TIMED_OUT, `Reviewer completion for ${request.routingKey} exceeded its ${request.timeoutMs}ms bound.`)
-				: refuse(INPROCESS_REVIEWER_FAILURE.ABORTED, `Reviewer completion for ${request.routingKey} was aborted by the caller.`);
-		}
-		return refuse(INPROCESS_REVIEWER_FAILURE.PROVIDER_FAILED, `Reviewer completion failed for ${request.routingKey}: ${sanitizeErrorExcerpt(error)}`);
+		return abortRefusal() ?? refuse(INPROCESS_REVIEWER_FAILURE.PROVIDER_FAILED, `Reviewer completion failed for ${request.routingKey}: ${sanitizeErrorExcerpt(error)}`);
+	}
+
+	const resolvedAbort = abortRefusal();
+	if (resolvedAbort !== undefined) return resolvedAbort;
+	if (assistant.stopReason === "aborted") {
+		// No signal of ours fired, so the provider cut the completion on its
+		// own: that is a provider failure, and its partial text is not a review.
+		return refuse(
+			INPROCESS_REVIEWER_FAILURE.PROVIDER_FAILED,
+			`Reviewer completion failed for ${request.routingKey}: the provider reported an aborted completion (${assistant.errorMessage ?? "no provider message"}).`,
+		);
 	}
 
 	if (assistant.stopReason === "error") {
