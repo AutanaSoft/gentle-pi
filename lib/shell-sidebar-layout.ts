@@ -6,6 +6,11 @@ import { renderSidebarBanner } from "./shell-sidebar-banner.ts";
 export const SIDEBAR_BREAKPOINT = 140;
 const RAIL_WIDTH = 50;
 const RAIL_PADDING = 1;
+// The rail's ScrollView keeps one column for its scrollbar; with the rail
+// padding that puts the card's right border two columns in from the edge.
+// The header row stops at the same column so its right group lines up with
+// the card instead of touching the terminal edge.
+const HEADER_RIGHT_INSET = RAIL_PADDING + 1;
 const GAP = 3;
 // Experimental Pi 0.85.1 internals. Only the fullscreen layout tree is adapted;
 // regular mode keeps native scrollback and the original bottom components.
@@ -161,9 +166,10 @@ export function installSidebar(tui: TUI, theme: ShellBarTheme): () => void {
 		}
 		try {
 			// The header is a full-width sibling row, not a rail section: it reads
-			// the whole terminal width, never the 50-column rail's content width.
+			// the terminal width (minus the rail's right inset), never the
+			// 50-column rail's content width.
 			const headerPart = state.parts.get("header");
-			const preparedHeaderLines = [...(headerPart?.render(width) ?? [])];
+			const preparedHeaderLines = [...(headerPart?.render(Math.max(0, width - HEADER_RIGHT_INSET)) ?? [])];
 			const headerActive = headerPart !== undefined && preparedHeaderLines.some((line) => line.trim() !== "");
 			const contentWidth = scroll.getContentWidth(RAIL_WIDTH);
 			const sections = ["footer", "agents", "todo"].map((key) => {
@@ -191,9 +197,15 @@ export function installSidebar(tui: TUI, theme: ShellBarTheme): () => void {
 			railLines = [];
 			if (sections.length && branding.length) {
 				railLines.push(...branding.map((line) => " ".repeat(RAIL_PADDING) + line + " ".repeat(RAIL_PADDING)));
+			} else if (sections.length && headerActive) {
+				// The banner used to hold the first card off the top; the header
+				// took its place, so keep one blank row between them.
+				railLines.push("");
 			}
 			for (const section of sections) {
-				if (railLines.length > 0) railLines.push("");
+				// One blank row separates a section from the banner or the
+				// previous section; the header gap above is not a section.
+				if (hits.length > 0 || branding.length > 0) railLines.push("");
 				const startY = railLines.length;
 				railLines.push(...section.lines.map((line) => " ".repeat(RAIL_PADDING) + line + " ".repeat(RAIL_PADDING)));
 				hits.push({ key: section.key, component: section.component, startY, height: section.lines.length, width: contentWidth - RAIL_PADDING * 2 });

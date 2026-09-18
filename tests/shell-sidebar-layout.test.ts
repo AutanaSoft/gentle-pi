@@ -591,12 +591,21 @@ test("an active header wraps the hstack in a vstack and removes the banner from 
 		{ basis: 0, grow: 1, shrink: 1, minSize: 1 },
 	]);
 	const header = node.entries[0].component as { render(width: number): string[] };
-	assert.deepEqual(header.render(0), ["HEADER 140"], "the header renders at the full terminal width, not the rail width");
+	// The rail card ends two columns before the terminal edge (its padding plus
+	// the scrollbar column); the header stops there too so its right group
+	// lines up with the card border instead of touching the edge.
+	assert.deepEqual(header.render(0), ["HEADER 138"], "the header renders at the terminal width minus the rail's right inset, not the rail width");
 
 	const hstack = hstackOf(f);
 	assert.equal(hstack.type, "hstack");
 	const scroll = railWithHeader(f);
-	assert.doesNotMatch(scroll.render(50).join("\n"), /✿ Gentle Shell ✿/, "the header carries the brand now, not the banner");
+	const rail = scroll.render(50);
+	assert.doesNotMatch(rail.join("\n"), /✿ Gentle Shell ✿/, "the header carries the brand now, not the banner");
+	// The banner used to hold the first card away from the top; with the
+	// header in its place the rail keeps one blank row so the first card does
+	// not sit flush against the header.
+	assert.equal(rail[0]?.trim(), "", "the rail opens with a blank row under the header");
+	assert.notEqual(rail[1]?.trim(), "", "the first card starts on the second row");
 });
 
 test("without a registered header the rail keeps the banner and the plain hstack", (t) => {
