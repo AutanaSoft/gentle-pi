@@ -1,39 +1,72 @@
 import assert from "node:assert/strict";
+import { randomUUID } from "node:crypto";
 import { execFileSync } from "node:child_process";
 import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, realpathSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { delimiter, join, resolve } from "node:path";
 import test from "node:test";
+import type { Api, AssistantMessage, Context, Model } from "@earendil-works/pi-ai";
+import { fauxAssistantMessage, registerFauxProvider } from "@earendil-works/pi-ai/compat";
 import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
 import { __testing, createGentleAiExtension } from "../../extensions/gentle-ai.ts";
 import { resolveGentleAiBinary } from "../../lib/gentle-ai-binary.ts";
+import type { InProcessReviewerRegistry } from "../../lib/inprocess-reviewer.ts";
 import { NativeReviewCliV216, type ExecFileAdapter, type NativeReviewCli } from "../../lib/native-review-cli.ts";
 import { REVIEW_HOST_RELAY_FAILURE, ReviewHostRelayError, reviewHostRelaySlots, runReviewHostRelaySlot } from "../../lib/review-host-relay.ts";
 import { GENTLE_PI_REVIEW_RELAY_CONTRACT, GENTLE_PI_REVIEW_RELAY_CONTRACT_ENV } from "../../lib/review-relay-contract.ts";
 import { decodeReviewStatusV3 } from "../../lib/review-integration-v2.ts";
 import { requireDevBinary } from "../support/native-binary-gate.ts";
 
-// gentle-pi#311 P2: the opaque Pi child adapter this devtest's fake `pi`
-// binary impersonated was removed — lens captures now run one in-process
-// reviewer completion through the live model registry, with no child process
-// and no `piExecutable`/`-e` forwarding. This devtest is gated behind
-// GENTLE_PI_GENTLE_AI_DEV_BINARY (never set in ordinary CI, so `RUNNABLE`
-// stays false and its body never executes here); it still needs its own P4
-// redesign around the in-process completion path — see gentle-pi#311 P4. This
-// local constant only keeps the file self-consistent (its FAKE_POSIX_PI
-// fixture and log assertions round-trip against it) until that redesign.
-const OPAQUE_PI_REVIEWER_ARGV = Object.freeze([
-	"--print",
-	"--mode", "json",
-	"--no-session",
-	"--no-tools",
-	"--no-extension-discovery",
-	"--no-skills",
-	"--no-prompt-templates",
-	"--no-themes",
-	"--no-context-files",
-	"--no-approve",
-] as const);
+// gentle-pi#311 P4: lens captures now run one in-process reviewer completion
+// through the live model registry (lib/inprocess-reviewer.ts), with no child
+// process, no `piExecutable`/`-e` forwarding, and no extension allowlist. The
+// devtests below inject a fake reviewer registry (`fauxReviewerFor`) instead
+// of a fake `pi` binary for that leg. The Go-owned targeted-validator role
+// vector (`review.capture-validation --agent=pi --execute=true`) is
+// self-contained and still spawns a real `pi` on PATH directly from the
+// native gentle-ai binary — that role is unrelated to this leg and stays out
+// of scope here (gentle-pi#311 P3).
+
+// ---------------------------------------------------------------------------
+// Fake reviewer registry (gentle-pi#311 P4) — registers pi-ai's own faux
+// provider, the SAME api-registry the real `completeSimple` dispatches
+// through in production, so the real `runInProcessReviewer` -> real
+// `completeSimple` path runs end-to-end with no network and no child
+// process. The scripted response reads the frozen prompt's
+// `GENTLE_AI_REVIEW_BINDING` line for the subject_hash the real Go admission
+// requires, exactly like the fake pi child this replaced. `enqueue` must be
+// called once per expected completion (the faux provider's response queue is
+// FIFO and errors once exhausted).
+// ---------------------------------------------------------------------------
+interface FauxReviewerCall {
+	promptText: string;
+	subjectHash: string | undefined;
+}
+function fauxReviewerFor(buildResponseText: (subjectHash: string | undefined, promptText: string) => string) {
+	const id = randomUUID();
+	const provider = `dev-binary-faux-reviewer-${id}`;
+	const faux = registerFauxProvider({ api: provider, provider, models: [{ id: "dev-fixture" }] });
+	const calls: FauxReviewerCall[] = [];
+	const enqueue = () => {
+		faux.appendResponses([(context: Context): AssistantMessage => {
+			const content = context.messages[0]?.content;
+			const textPart = Array.isArray(content) ? content.find((part) => part.type === "text") : undefined;
+			const promptText = (textPart as { text?: string } | undefined)?.text ?? "";
+			const newline = promptText.indexOf("\n");
+			const firstLine = newline === -1 ? promptText : promptText.slice(0, newline);
+			const prefix = "GENTLE_AI_REVIEW_BINDING ";
+			const subjectHash = firstLine.startsWith(prefix) ? (JSON.parse(firstLine.slice(prefix.length)) as { subject_hash?: string }).subject_hash : undefined;
+			calls.push({ promptText, subjectHash });
+			return fauxAssistantMessage(buildResponseText(subjectHash, promptText));
+		}]);
+	};
+	const model = faux.getModel() as unknown as Model<Api>;
+	const registry: InProcessReviewerRegistry = {
+		find: () => model,
+		getApiKeyAndHeaders: async () => ({ ok: true, apiKey: "faux-key" }),
+	};
+	return { registry, selection: `${model.provider}/${model.id}`, routingKey: "review-risk", enqueue, calls };
+}
 
 const DEV_BINARY = process.env.GENTLE_AI_DEV_BINARY;
 const RELAY_DEV_BINARY = process.env.GENTLE_PI_GENTLE_AI_DEV_BINARY;
@@ -285,47 +318,25 @@ function grantedConsentInvocation(value: unknown): string {
 	return stringValue(granted!.invocation, "granted consent invocation");
 }
 
+// gentle-pi#311 P4: this fixture used to serve two roles: the lens reviewer
+// capture (spawned by our own TS relay, now replaced by `fauxReviewerFor`)
+// and the Go-owned targeted-validator vector (spawned directly by the native
+// gentle-ai binary via `review.capture-validation --agent=pi --execute=true`,
+// unrelated to this leg and unchanged — gentle-pi#311 P3). Only the second
+// role remains reachable, so the reviewer branch is gone.
 const FAKE_POSIX_PI = `#!/usr/bin/env node
 import fs from "node:fs";
-const expectedArgv = JSON.parse(process.env.OPAQUE_PI_REVIEWER_ARGV);
-const expectedPaths = JSON.parse(process.env.OPAQUE_PI_REVIEWER_PATHS);
 const chunks = [];
 process.stdin.on("data", (chunk) => chunks.push(chunk));
 process.stdin.on("end", () => {
-  const prompt = Buffer.concat(chunks);
-  const promptText = prompt.toString("utf8");
+  const promptText = Buffer.concat(chunks).toString("utf8");
   const targetedValidatorResult = process.env.OPAQUE_PI_TARGETED_VALIDATOR_RESULT;
-  let subjectHash;
-  if (targetedValidatorResult === undefined) {
-    const newline = prompt.indexOf(0x0a);
-    if (newline < 0) throw new Error("missing binding line");
-    const firstLine = prompt.subarray(0, newline).toString("utf8");
-    const prefix = "GENTLE_AI_REVIEW_BINDING ";
-    if (!firstLine.startsWith(prefix)) throw new Error("missing binding prefix");
-    const binding = JSON.parse(firstLine.slice(prefix.length));
-    if (typeof binding.subject_hash !== "string" || !/^sha256:[0-9a-f]{64}$/.test(binding.subject_hash)) throw new Error("invalid binding subject_hash");
-    if (JSON.stringify(process.argv.slice(2)) !== JSON.stringify(expectedArgv)) throw new Error("unexpected opaque Pi argv");
-    subjectHash = binding.subject_hash;
-  } else if (promptText.length === 0) {
-    throw new Error("missing targeted-validator prompt");
-  }
+  if (targetedValidatorResult === undefined || promptText.length === 0) throw new Error("missing targeted-validator prompt");
   const prior = fs.existsSync(process.env.OPAQUE_PI_REVIEWER_LOG) ? JSON.parse(fs.readFileSync(process.env.OPAQUE_PI_REVIEWER_LOG, "utf8")) : { calls: [] };
   const calls = Array.isArray(prior.calls) ? prior.calls : [];
-  calls.push({
-    argv: process.argv.slice(2), cwd: process.cwd(), entries: fs.readdirSync(process.cwd()), ...(subjectHash === undefined ? {} : { subject_hash: subjectHash }), prompt: promptText,
-    role: targetedValidatorResult === undefined ? "reviewer" : "targeted-validator",
-  });
+  calls.push({ argv: process.argv.slice(2), cwd: process.cwd(), entries: fs.readdirSync(process.cwd()), prompt: promptText, role: "targeted-validator" });
   fs.writeFileSync(process.env.OPAQUE_PI_REVIEWER_LOG, JSON.stringify({ calls }));
-  if (targetedValidatorResult !== undefined) {
-    process.stdout.write(targetedValidatorResult);
-    return;
-  }
-  process.stdout.write(JSON.stringify({
-    subject_hash: subjectHash,
-    inspection: { status: "completed", paths: expectedPaths },
-    findings: process.env.OPAQUE_PI_REVIEWER_FINDINGS === undefined ? [] : JSON.parse(process.env.OPAQUE_PI_REVIEWER_FINDINGS),
-    evidence: ["inspected every frozen candidate path"],
-  }));
+  process.stdout.write(targetedValidatorResult);
 });
 `;
 
@@ -404,20 +415,25 @@ test("dev-binary: POSIX Pi host relay captures one real B-target slot from an A-
 	assert.ok(slot.submission, "the real Pi slot must include Go's provider-owned submission form");
 	assert.ok(slot.subjectHash, "the real Pi slot must include its artifact subject hash");
 
-	const fakePi = join(sessionA, "fake-pi");
-	const fakePiLog = join(sessionA, "fake-pi-log.json");
-	writeFileSync(fakePi, FAKE_POSIX_PI);
-	chmodSync(fakePi, 0o755);
+	// gentle-pi#311 P4: the reviewer completion runs in-process — a fake
+	// registry replaces the fake `pi` binary this devtest used to spawn for
+	// the lens capture. There is no child process and no scratch sandbox to
+	// isolate or clean up for this leg any more.
+	const reviewer = fauxReviewerFor((subjectHash) => JSON.stringify({
+		subject_hash: subjectHash,
+		inspection: { status: "completed", paths: expectedPaths },
+		findings: [],
+		evidence: ["inspected every frozen candidate path"],
+	}));
+	reviewer.enqueue();
 	const relay = await runReviewHostRelaySlot({
 		captureArgumentTokens: slot.captureArgumentTokens,
 		submission: slot.submission,
 		targetCwd: canonicalB,
-		environment: {
-			...environment,
-			OPAQUE_PI_REVIEWER_ARGV: JSON.stringify(OPAQUE_PI_REVIEWER_ARGV),
-			OPAQUE_PI_REVIEWER_LOG: fakePiLog,
-			OPAQUE_PI_REVIEWER_PATHS: JSON.stringify(expectedPaths),
-		},
+		environment,
+		reviewerRegistry: reviewer.registry,
+		selection: reviewer.selection,
+		routingKey: reviewer.routingKey,
 		gentleAiTimeoutMs: 30_000,
 		piTimeoutMs: 30_000,
 	});
@@ -425,17 +441,8 @@ test("dev-binary: POSIX Pi host relay captures one real B-target slot from an A-
 	assert.ok(relay.resultByteLength > 0);
 	assert.equal(record(JSON.parse(relay.submission) as unknown, "capture submission").admission_decision, "completed");
 
-	const fakePiLogRecord = record(JSON.parse(readFileSync(fakePiLog, "utf8")) as unknown, "fake Pi log");
-	assert.ok(Array.isArray(fakePiLogRecord.calls), "fake Pi log must record its subprocess calls");
-	assert.equal(fakePiLogRecord.calls.length, 1);
-	const fakePiResult = record(fakePiLogRecord.calls[0], "fake Pi result");
-	assert.deepEqual(fakePiResult.argv, OPAQUE_PI_REVIEWER_ARGV);
-	assert.deepEqual(fakePiResult.entries, []);
-	assert.equal(fakePiResult.subject_hash, slot.subjectHash);
-	const scratchCwd = stringValue(fakePiResult.cwd, "fake Pi scratch cwd");
-	assert.notEqual(scratchCwd, canonicalB);
-	assert.notEqual(scratchCwd, sessionA);
-	assert.equal(existsSync(scratchCwd), false, "opaque Pi scratch cwd must be removed after the subprocess exits");
+	assert.equal(reviewer.calls.length, 1, "the in-process reviewer must complete exactly once");
+	assert.equal(reviewer.calls[0]!.subjectHash, slot.subjectHash, "the reviewer completion must receive the real frozen binding's subject hash");
 
 	const advanced = candidateStatus(RELAY_DEV_BINARY!, sessionA, canonicalB, environment, lineage);
 	const reoffered = reviewHostRelaySlots(advanced.nextTransition?.collect?.inputs ?? []).some((candidate) =>
@@ -490,14 +497,25 @@ test("dev-binary: a garbage reviewer result is refused at admission as a proven 
 	const reviewerBinding = collectBindingsFor(status, "review.capture-result")[0];
 	assert.ok(reviewerBinding, "current STATUS must publish a reviewer capture binding");
 	const subjectHash = collectBindingArgument(reviewerBinding!, "subject-hash");
-	const fakePi = join(scratch, "fake-pi");
-	writeFileSync(fakePi, "#!/usr/bin/env node\nprocess.stdin.resume();\nprocess.stdin.on('end', () => { process.stdout.write('not json at all'); });\n");
-	chmodSync(fakePi, 0o755);
+	// gentle-pi#311 P4: the in-process reviewer completion produces the
+	// garbage text directly (no fake `pi` binary); Go's real admission still
+	// refuses it exactly as before.
+	const reviewer = fauxReviewerFor(() => "not json at all");
 	let relayError: unknown;
 	t.after(() => __testing.setReviewHostRelayRunnerForTesting());
 	__testing.setReviewHostRelayRunnerForTesting(async (request) => {
+		reviewer.enqueue();
 		try {
-			return await runReviewHostRelaySlot({ ...request, gentleAiExecutable: RELAY_DEV_BINARY!, environment, gentleAiTimeoutMs: 30_000, piTimeoutMs: 30_000 });
+			return await runReviewHostRelaySlot({
+				...request,
+				gentleAiExecutable: RELAY_DEV_BINARY!,
+				environment,
+				reviewerRegistry: reviewer.registry,
+				selection: reviewer.selection,
+				routingKey: reviewer.routingKey,
+				gentleAiTimeoutMs: 30_000,
+				piTimeoutMs: 30_000,
+			});
 		} catch (error) {
 			relayError = error;
 			throw error;
@@ -620,6 +638,10 @@ test("dev-binary: Pi controller keeps an explicit B root and selected-untracked 
 	assert.equal(startedDetails.workspace_root, canonicalB);
 	const lineage = stringValue(record(startedDetails.result, "combined start result").lineage_id, "combined lineage");
 
+	// gentle-pi#311 P3 (out of scope here): the Go-owned targeted-validator
+	// role vector is self-contained and still spawns a real `pi` on PATH
+	// directly from the native gentle-ai binary, so this fixture and its PATH
+	// installation stay exactly as they were for that leg.
 	const fakePiDirectory = join(sessionA, "fake-pi-bin");
 	mkdirSync(fakePiDirectory);
 	const fakePi = join(fakePiDirectory, "pi");
@@ -627,9 +649,7 @@ test("dev-binary: Pi controller keeps an explicit B root and selected-untracked 
 	writeFileSync(fakePi, FAKE_POSIX_PI);
 	chmodSync(fakePi, 0o755);
 	environment.PATH = [fakePiDirectory, process.env.PATH].filter((entry): entry is string => entry !== undefined && entry.length > 0).join(delimiter);
-	environment.OPAQUE_PI_REVIEWER_ARGV = JSON.stringify(OPAQUE_PI_REVIEWER_ARGV);
 	environment.OPAQUE_PI_REVIEWER_LOG = fakePiLog;
-	environment.OPAQUE_PI_REVIEWER_PATHS = JSON.stringify([".github/workflows/relay.yml", "selected.txt"]);
 	const reviewerFindings = [{
 		location: "selected.txt:1",
 		severity: "BLOCKER",
@@ -638,21 +658,28 @@ test("dev-binary: Pi controller keeps an explicit B root and selected-untracked 
 		evidence_class: "deterministic",
 		causal_disposition: "introduced",
 	}];
+	// gentle-pi#311 P4: the lens reviewer capture runs in-process through a
+	// fake registry instead of the fake `pi` binary above (which now serves
+	// only the Go-owned targeted-validator leg).
+	const reviewer = fauxReviewerFor((subjectHash) => JSON.stringify({
+		subject_hash: subjectHash,
+		inspection: { status: "completed", paths: [".github/workflows/relay.yml", "selected.txt"] },
+		findings: reviewerFindings,
+		evidence: ["inspected every frozen candidate path"],
+	}));
 	const relayTargetRoots: string[] = [];
 	t.after(() => __testing.setReviewHostRelayRunnerForTesting());
 	__testing.setReviewHostRelayRunnerForTesting(async (request) => {
 		assert.equal(request.targetCwd, canonicalB, "the host relay must materialize and submit against B");
 		relayTargetRoots.push(request.targetCwd!);
+		reviewer.enqueue();
 		return await runReviewHostRelaySlot({
 			...request,
 			gentleAiExecutable: RELAY_DEV_BINARY!,
-			environment: {
-				...environment,
-				OPAQUE_PI_REVIEWER_ARGV: JSON.stringify(OPAQUE_PI_REVIEWER_ARGV),
-				OPAQUE_PI_REVIEWER_LOG: fakePiLog,
-				OPAQUE_PI_REVIEWER_PATHS: JSON.stringify([".github/workflows/relay.yml", "selected.txt"]),
-				OPAQUE_PI_REVIEWER_FINDINGS: JSON.stringify(reviewerFindings),
-			},
+			environment,
+			reviewerRegistry: reviewer.registry,
+			selection: reviewer.selection,
+			routingKey: reviewer.routingKey,
 			gentleAiTimeoutMs: 30_000,
 			piTimeoutMs: 30_000,
 		});
@@ -684,10 +711,7 @@ test("dev-binary: Pi controller keeps an explicit B root and selected-untracked 
 		assert.ok(publicStatusProjectionPaths(reviewerStatusDetails).includes("selected.txt"), "public STATUS must retain the selected path in B's projection");
 		assert.equal(publicStatusProjectionPaths(reviewerStatusDetails).includes("excluded.txt"), false, "public STATUS must retain the excluded path outside B's projection");
 
-		const fakeCallsBeforeForecast = existsSync(fakePiLog)
-			? record(JSON.parse(readFileSync(fakePiLog, "utf8")) as unknown, "reviewer fake Pi forecast log").calls
-			: [];
-		assert.ok(Array.isArray(fakeCallsBeforeForecast), "reviewer fake Pi forecast log must carry calls when present");
+		const reviewerCallsBeforeForecast = reviewer.calls.length;
 		const reviewerForecast = await capture.execute(
 			`combined-reviewer-forecast-${attempt}`,
 			{ lineageId: lineage, workspaceRoot: nestedTarget, collectBinding: reviewerBinding },
@@ -698,11 +722,7 @@ test("dev-binary: Pi controller keeps an explicit B root and selected-untracked 
 		const reviewerForecastDetails = record(reviewerForecast.details, "combined reviewer forecast");
 		assert.equal(reviewerForecastDetails.status, "blocked");
 		assert.equal(reviewerForecastDetails.outcome, "reviewer-model-run-forecast");
-		const fakeCallsAfterForecast = existsSync(fakePiLog)
-			? record(JSON.parse(readFileSync(fakePiLog, "utf8")) as unknown, "reviewer fake Pi forecast result").calls
-			: [];
-		assert.ok(Array.isArray(fakeCallsAfterForecast), "reviewer fake Pi forecast result must carry calls when present");
-		assert.equal(fakeCallsAfterForecast.length, fakeCallsBeforeForecast.length, "forecast acknowledgement must not launch a reviewer capture");
+		assert.equal(reviewer.calls.length, reviewerCallsBeforeForecast, "forecast acknowledgement must not launch a reviewer completion");
 
 		const reviewerCapture = await capture.execute(
 			`combined-reviewer-capture-${attempt}`,
@@ -713,9 +733,7 @@ test("dev-binary: Pi controller keeps an explicit B root and selected-untracked 
 		);
 		const reviewerCaptureDetails = record(reviewerCapture.details, "combined reviewer capture");
 		assert.ok(["captured", "closed"].includes(stringValue(reviewerCaptureDetails.status, "combined reviewer capture status")), "one acknowledged binding must perform exactly one native reviewer capture");
-		const fakeCallsAfterCapture = record(JSON.parse(readFileSync(fakePiLog, "utf8")) as unknown, "reviewer fake Pi capture result").calls;
-		assert.ok(Array.isArray(fakeCallsAfterCapture), "reviewer fake Pi capture result must carry calls");
-		assert.equal(fakeCallsAfterCapture.length, fakeCallsBeforeForecast.length + 1, "one acknowledged binding must launch exactly one reviewer capture");
+		assert.equal(reviewer.calls.length, reviewerCallsBeforeForecast + 1, "one acknowledged binding must launch exactly one reviewer completion");
 		reviewerCaptureCount += 1;
 		const closure = reviewerCaptureDetails.closure;
 		if (closure !== undefined) {
@@ -742,17 +760,12 @@ test("dev-binary: Pi controller keeps an explicit B root and selected-untracked 
 	assert.ok(reviewerCaptureCount > 0);
 	assert.ok(relayTargetRoots.length === reviewerCaptureCount);
 	assert.ok(relayTargetRoots.every((root) => root === canonicalB), "every reviewer relay leg must stay bound to B");
-	const combinedFakePiLog = record(JSON.parse(readFileSync(fakePiLog, "utf8")) as unknown, "combined fake Pi log");
-	assert.ok(Array.isArray(combinedFakePiLog.calls), "combined fake Pi log must record reviewer subprocess calls");
-	const reviewerCalls = combinedFakePiLog.calls.map((call) => record(call, "combined fake Pi reviewer call")).filter((call) => call.role === "reviewer");
-	assert.equal(reviewerCalls.length, reviewerCaptureCount);
-	for (const call of reviewerCalls) {
-		assert.equal(call.subject_hash === undefined, false, "the fake reviewer must receive one provider-bound subject");
-		assert.deepEqual(call.argv, OPAQUE_PI_REVIEWER_ARGV);
-		assert.deepEqual(call.entries, [], "the reviewer must run from an empty isolated sandbox");
-		assert.notEqual(call.cwd, canonicalB, "the reviewer subprocess must not run in B");
-		assert.notEqual(call.cwd, sessionA, "the reviewer subprocess must not run in A");
-		assert.equal(existsSync(stringValue(call.cwd, "reviewer fake Pi scratch cwd")), false, "the reviewer sandbox must be removed after the subprocess exits");
+	// gentle-pi#311 P4: the reviewer completion runs in-process — there is no
+	// subprocess log, argv, or scratch sandbox to assert for this leg any
+	// more; `reviewer.calls` is the in-process equivalent record.
+	assert.equal(reviewer.calls.length, reviewerCaptureCount);
+	for (const call of reviewer.calls) {
+		assert.notEqual(call.subjectHash, undefined, "the in-process reviewer must receive one provider-bound subject");
 	}
 
 	const correctionStatus = await controller.execute(
