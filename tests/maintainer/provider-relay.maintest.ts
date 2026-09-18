@@ -414,11 +414,18 @@ test("armed positive-lens: runMatrix completes end-to-end through the in-process
 	const submitLog = join(directory, "submitted");
 	const gentleAi = join(directory, "gentle-ai");
 	// A capable gentle-ai: materialize returns a frozen prompt carrying the
-	// real GENTLE_AI_REVIEW_BINDING line (exactly what Go embeds in
-	// production) so the armed in-process reviewer can echo the same
-	// subject_hash the submission expects; submit accepts unconditionally,
-	// mirroring the repo's other fake-executable fixtures.
+	// real GENTLE_AI_REVIEW_BINDING and GENTLE_AI_REVIEW_CONTEXT lines
+	// (exactly what Go embeds in production) so the armed in-process reviewer
+	// can echo the subject_hash and the changed-path manifest the submission
+	// expects. Submit does NOT accept unconditionally: it reads the --input
+	// payload and refuses any result missing a field Go admission requires
+	// (subject_hash, inspection.status, inspection.paths, findings,
+	// evidence), so a faux reviewer that drifts from the reviewer contract
+	// fails here instead of only against the real binary.
 	const subjectHash = `sha256:${"a".repeat(64)}`;
+	const manifestPaths = ["lib/review-host-relay.ts", "docs/review-integration.md"];
+	const bindingLine = `GENTLE_AI_REVIEW_BINDING {"subject_hash":"${subjectHash}"}`;
+	const contextLine = `GENTLE_AI_REVIEW_CONTEXT ${JSON.stringify({ changed_path_manifest: manifestPaths.map((path) => ({ path, status: "modified" })) })}`;
 	writeFileSync(
 		gentleAi,
 		`#!/usr/bin/env node
@@ -426,10 +433,22 @@ const fs = require("node:fs");
 const argv = process.argv.slice(2);
 if (argv.includes("--materialize=true")) {
 	fs.writeFileSync(${JSON.stringify(materializeLog)}, JSON.stringify(argv));
-	process.stdout.write(${JSON.stringify(`GENTLE_AI_REVIEW_BINDING {"subject_hash":"${subjectHash}"}\nreview this diff\n`)});
+	process.stdout.write(${JSON.stringify(`${bindingLine}\n${contextLine}\nreview this diff\n`)});
 	process.exit(0);
 }
-fs.writeFileSync(${JSON.stringify(submitLog)}, JSON.stringify(argv));
+const inputToken = argv.find((token) => token.startsWith("--input="));
+const payload = JSON.parse(fs.readFileSync(inputToken.slice("--input=".length), "utf8"));
+fs.writeFileSync(${JSON.stringify(submitLog)}, JSON.stringify({ argv, payload }));
+const missing = [];
+if (payload.subject_hash !== ${JSON.stringify(subjectHash)}) missing.push("subject_hash");
+if (payload.inspection?.status !== "completed") missing.push("inspection.status");
+if (!Array.isArray(payload.inspection?.paths) || payload.inspection.paths.length === 0) missing.push("inspection.paths");
+if (!Array.isArray(payload.findings)) missing.push("findings");
+if (!Array.isArray(payload.evidence)) missing.push("evidence");
+if (missing.length > 0) {
+	process.stderr.write("reviewer result is missing required fields: " + missing.join(", "));
+	process.exit(1);
+}
 process.stdout.write(JSON.stringify({ schema: "gentle-ai.review-result-artifact/v2", admission_decision: "completed" }));
 process.exit(0);
 `,
@@ -445,6 +464,14 @@ process.exit(0);
 	assert.ok(verdict!.resultByteLength! > 0);
 	assert.equal(existsSync(materializeLog), true);
 	assert.equal(existsSync(submitLog), true, "an armed, successful positive-lens case must reach submit");
+	// The submitted payload must carry every field Go admission requires and
+	// inspect exactly the frozen manifest, so the faux reviewer can never
+	// drift from the reviewer contract unnoticed.
+	const submitted = JSON.parse(readFileSync(submitLog, "utf8")) as { payload: Record<string, unknown> };
+	assert.equal(submitted.payload["subject_hash"], subjectHash);
+	assert.deepEqual(submitted.payload["inspection"], { status: "completed", paths: manifestPaths });
+	assert.deepEqual(submitted.payload["findings"], []);
+	assert.ok(Array.isArray(submitted.payload["evidence"]) && (submitted.payload["evidence"] as unknown[]).length > 0);
 });
 test("armed positive-lens: a malformed reviewerSelection blocks with a clear reason, never a synthesized model", async (t) => {
 	const stub = capableStubHarness(t);

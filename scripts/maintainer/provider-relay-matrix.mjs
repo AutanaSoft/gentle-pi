@@ -231,11 +231,27 @@ function unresolvableReviewerRegistry() {
 // the real `completeSimple` dispatches through in production -- so the real
 // `runInProcessReviewer` -> real `completeSimple` path runs with no network.
 // The scripted response reads the frozen prompt's `GENTLE_AI_REVIEW_BINDING`
-// line for the subject_hash the real Go admission requires, exactly like the
-// fake pi child this replaced (gentle-pi#311 P4). Not unregistered: each
+// line for the subject_hash and its `GENTLE_AI_REVIEW_CONTEXT` line for the
+// changed-path manifest, and answers with every field the reviewer result
+// contract requires -- subject_hash, a completed inspection over exactly the
+// frozen paths, findings, evidence -- so the real Go admission accepts it
+// (gentle-pi#311 P4). Not unregistered: each
 // call uses a fresh random api id, and this runs at most once per short-lived
 // process (the CLI's single `main()` or one test), so a leaked entry in the
 // process-global api-registry is harmless.
+// Reads the one-line JSON that follows a frozen prompt marker (the binding
+// and context lines Go writes at the top of every reviewer task). Returns
+// undefined when the marker is absent or its JSON is malformed, so the faux
+// reviewer answers with an incomplete result that real admission refuses
+// instead of throwing inside the provider and masking the contract drift.
+function frozenPromptMarkerJson(promptText, marker) {
+	const prefix = `${marker} `;
+	for (const line of promptText.split("\n")) {
+		if (!line.startsWith(prefix)) continue;
+		try { return JSON.parse(line.slice(prefix.length)); } catch { return undefined; }
+	}
+	return undefined;
+}
 function armedFauxReviewerRegistry(reviewerSelection) {
 	const separatorIndex = reviewerSelection.indexOf("/");
 	if (separatorIndex <= 0 || separatorIndex === reviewerSelection.length - 1) {
@@ -249,11 +265,16 @@ function armedFauxReviewerRegistry(reviewerSelection) {
 		const content = context.messages[0]?.content;
 		const textPart = Array.isArray(content) ? content.find((part) => part.type === "text") : undefined;
 		const promptText = textPart?.text ?? "";
-		const newline = promptText.indexOf("\n");
-		const firstLine = newline === -1 ? promptText : promptText.slice(0, newline);
-		const prefix = "GENTLE_AI_REVIEW_BINDING ";
-		const subjectHash = firstLine.startsWith(prefix) ? JSON.parse(firstLine.slice(prefix.length)).subject_hash : undefined;
-		return fauxAssistantMessage(JSON.stringify({ subject_hash: subjectHash, findings: [], evidence: ["armed maintainer faux reviewer"] }));
+		const binding = frozenPromptMarkerJson(promptText, "GENTLE_AI_REVIEW_BINDING");
+		const frozenContext = frozenPromptMarkerJson(promptText, "GENTLE_AI_REVIEW_CONTEXT");
+		const manifest = Array.isArray(frozenContext?.changed_path_manifest) ? frozenContext.changed_path_manifest : [];
+		const paths = manifest.map((entry) => entry?.path).filter((path) => typeof path === "string" && path.length > 0);
+		return fauxAssistantMessage(JSON.stringify({
+			subject_hash: binding?.subject_hash,
+			inspection: { status: "completed", paths },
+			findings: [],
+			evidence: ["armed maintainer faux reviewer inspected every frozen candidate path"],
+		}));
 	}]);
 	const model = faux.getModel();
 	return {
