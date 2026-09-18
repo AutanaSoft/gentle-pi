@@ -204,6 +204,63 @@ test("ODD forwards configured TDD without equating test presence with enablement
 	assert.doesNotMatch(wrapper, /If tests exist, use strict TDD/);
 });
 
+test("mandatory delegation triggers are behavioral in the lazy canonical port and the always-on ODD step", () => {
+	for (const clause of [
+		"These triggers are mandatory, not advisory.",
+		"stop and delegate through the runtime's subagent mechanism before continuing",
+		"executing past a fired trigger inline is a routing defect even if the work succeeds",
+		"**Mapping trigger",
+		"**Writer trigger",
+		"**Preparation trigger:**",
+		"**Long-session backstop",
+		"pause and delegate the next bounded unit of work",
+		"**Route declaration:**",
+		"record the chosen route per task",
+		"so skipped delegation is observable instead of silent",
+		"These triggers never select SDD and never create SDD artifacts",
+	]) {
+		assert.ok(delegation.includes(clause), `lazy canonical port is missing mandatory delegation clause: ${clause}`);
+	}
+	assert.ok(
+		wrapper.includes("honoring its mandatory delegation triggers"),
+		"the always-on ODD step 6 must honor its mandatory delegation triggers",
+	);
+	assert.ok(
+		wrapper.includes("executing past a fired trigger inline is a routing defect"),
+		"the always-on ODD protocol must state that skipping a fired trigger is a routing defect",
+	);
+});
+
+test("core and lazy canonical trigger lists agree in numbering and semantics", () => {
+	for (const entry of [
+		"1. **4-file rule**",
+		"2. **Multi-file write rule**",
+		"3. **Incident rule**",
+		"4. **Long-session rule**",
+		"5. **Verification rule**",
+	]) {
+		assert.ok(core.includes(entry), `always-on core trigger list is missing: ${entry}`);
+	}
+	for (const entry of [
+		"1. **Mapping trigger (4-file rule):**",
+		"2. **Writer trigger (Multi-file write rule):**",
+		"3. **Incident rule:**",
+		"4. **Long-session backstop (Long-session rule):**",
+		"5. **Verification rule**",
+	]) {
+		assert.ok(delegation.includes(entry), `lazy canonical trigger list is missing: ${entry}`);
+	}
+	for (const stale of [
+		"**Bounded read rule**",
+		"**Write rule**",
+		"**Context rule**",
+		"**Per-action rule**",
+		"**Optional SDD rule**",
+	]) {
+		assert.ok(!delegation.includes(stale), `reconciled canonical list retains stale trigger framing: ${stale}`);
+	}
+});
+
 test("ODD protocol is always-on in the rendered system prompt and runs by default", () => {
 	const orderedClauses = [
 		"Default workflow: Organic Driven Development (MANDATORY)",

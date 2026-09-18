@@ -123,14 +123,19 @@ Keep one writer and a short synthesized handoff. Delegation is mandatory at the 
 
 #### Mandatory Delegation Triggers
 
-These are parent-orchestrator routing boundaries. Use the smallest useful topology and keep the safety machinery behind the outcome-first interaction. Do not pass these rules to child agents as permission to orchestrate.
+These are parent-orchestrator routing boundaries; do not pass these rules to child agents as permission to orchestrate. These triggers are mandatory, not advisory. When one fires, stop and delegate through the runtime's subagent mechanism before continuing; executing past a fired trigger inline is a routing defect even if the work succeeds. Delegation keeps the parent context thin enough to orchestrate; it does not slow the work down.
 
-1. **Bounded read rule**: read 1–3 files inline to decide or verify.
-2. **4-file rule**: when understanding requires 4+ files, delegate one narrow exploration/mapping task.
-3. **Write rule**: keep one mechanical, already-understood file inline only when it needs no research or unresolved design work; delegate one writer for 2+ non-trivial files.
-4. **Context rule**: delegate reading that prepares a write and broad research/context compression.
-5. **Per-action rule**: tests, builds, and installs may use fresh workers without changing the implementation route or creating SDD state.
-6. **Optional SDD rule**: retain SDD only after an explicit request or accepted proposal. Resolve organic uncertainty with optional research and a concise proposal only for a real decision; risk alone never forces SDD.
+1. **Mapping trigger (4-file rule):** when understanding the work requires 4 or more files, delegate one narrow exploration or mapping task before deciding or writing anything.
+2. **Writer trigger (Multi-file write rule):** when implementation touches 2 or more non-trivial files, delegate one bounded writer instead of editing them inline.
+3. **Incident rule:** after wrong `cwd`, accidental repository/worktree mutation, failed merge recovery, confusing test command, or environment workaround, stop and diagnose the incident separately before resuming.
+4. **Long-session backstop (Long-session rule):** after about 20 tool calls, 5 exploratory reads, or 2 non-mechanical edits without any delegation, pause and delegate the next bounded unit of work.
+5. **Verification rule** (gentle-pi#661/#662, RDD-aware): executing or delegating verification commands goes to `gentle-ai-verify`; only the 1–3-file read-only check stays inline. The normative on/off/unknown routing is stated once under Pi Trigger Runtime Bindings below; reference it, do not restate it.
+
+**Preparation trigger:** reading that prepares a write, and broad research or context compression, delegate together with or ahead of the write instead of filling the parent context.
+
+**Route declaration:** for substantial work, record the chosen route per task (inline or delegated) and the trigger evidence in the feature document, so skipped delegation is observable instead of silent.
+
+These triggers never select SDD and never create SDD artifacts; they only choose between direct inline and delegated direct inside the organic flow.
 
 For bounded multi-file writes, prefer the installed package-owned `gentle-ai-worker`, then a user-configured `worker`. If neither worker definition exists, fall back to the native `Agent` even when `subagent_*` tools are available. If no delegation mechanism is available, stop and explain the blocker. Judgment Day phase roles are never generic fallbacks. If the generic writer chain is unavailable, use the documented native generic fallback or stop.
 
