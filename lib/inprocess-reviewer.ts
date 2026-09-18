@@ -1,20 +1,20 @@
 // In-process reviewer completion (gentle-ai#4611; gentle-pi#311 P1).
 //
-// The relay child in opaque-pi-reviewer-adapter.ts runs `pi --print
-// --no-extensions`, which drops extension-registered providers ("Model not
-// found") and strips env-provided API keys; the env allowlist
-// (GENTLE_PI_REVIEW_RELAY_EXTENSIONS) requires per-provider manual
-// configuration and Go roles have no parity with it. This module replaces
-// that transport for a single reviewer completion: it resolves the caller's
-// "provider/id" selection through pi's live model registry, authenticates
-// through the registry's own resolver, and completes exactly one frozen
-// prompt as a single user message — no systemPrompt, no tools, no session,
-// no extension hooks.
+// The relay child this module replaced ran a locked-down `pi --print` process
+// with extension discovery disabled, which dropped extension-registered
+// providers ("Model not found") and stripped env-provided API keys; its env
+// allowlist required per-provider manual configuration and Go roles had no
+// parity with it. This module is that transport's replacement for a single
+// reviewer completion: it resolves
+// the caller's "provider/id" selection through pi's live model registry,
+// authenticates through the registry's own resolver, and completes exactly
+// one frozen prompt as a single user message — no systemPrompt, no tools, no
+// session, no extension hooks.
 //
 // Every I/O seam is injected (`registry`, `complete`, `now`), so this module
-// runs under tests with no network and no pi process. Wiring this into the
-// lens relay and the provider role vectors is out of scope here (gentle-pi#311
-// P2/P3); this is a pure completion, never invoked from this file.
+// runs under tests with no network and no pi process. gentle-pi#311 P2 wires
+// this into the lens relay (lib/review-host-relay.ts); P3 wires the provider
+// role vectors. This file stays a pure completion, never invoked from here.
 
 import type { Api, AssistantMessage, Context, Model, ProviderHeaders, SimpleStreamOptions, TextContent, ThinkingLevel } from "@earendil-works/pi-ai";
 import type { completeSimple } from "@earendil-works/pi-ai/compat";
@@ -74,10 +74,9 @@ export interface InProcessReviewerDeps {
 	readonly now?: () => number;
 }
 
-// No existing bound covers the reviewer's assistant text: the opaque Pi
-// adapter (lib/opaque-pi-reviewer-adapter.ts extractPiAssistantText) returns
-// the extracted text unbounded. 4 MiB matches this repo's established
-// convention for this class of bound (lib/session-changes.ts
+// No existing bound covers the reviewer's completion text: the child this
+// module replaced returned its extracted text unbounded. 4 MiB matches this
+// repo's established convention for this class of bound (lib/session-changes.ts
 // MAX_SESSION_BYTES, lib/provider-contract-bundle.ts MAX_FILE_BYTES).
 export const INPROCESS_REVIEWER_OUTPUT_MAX_BYTES = 4 * 1024 * 1024;
 

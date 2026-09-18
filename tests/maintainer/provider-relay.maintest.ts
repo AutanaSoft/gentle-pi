@@ -549,7 +549,7 @@ test("negative control: the real relay returns a typed relay-unavailable error b
 	// pi launch; RELAY_UNAVAILABLE at materialize proves Pi never launched.
 	let caught: unknown;
 	try {
-		await runReviewHostRelaySlot({ captureArgumentTokens: [...CAPTURE_TOKENS], submission: structuredClone(SUBMISSION), gentleAiExecutable: baselineBinary!, piExecutable: "pi" });
+		await runReviewHostRelaySlot({ captureArgumentTokens: [...CAPTURE_TOKENS], submission: structuredClone(SUBMISSION), gentleAiExecutable: baselineBinary! });
 	} catch (error) {
 		caught = error;
 	}

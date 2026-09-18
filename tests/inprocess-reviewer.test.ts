@@ -12,9 +12,9 @@ import {
 } from "../lib/inprocess-reviewer.ts";
 
 // The in-process reviewer completion (gentle-ai#4611; gentle-pi#311 P1) runs
-// one reviewer role through pi's live model registry instead of a `pi
-// --print --no-extensions` child. Every seam here is a fake: no network, no
-// pi process, no process.env reads.
+// one reviewer role through pi's live model registry instead of a locked-down
+// `pi --print` child with extension discovery disabled. Every seam here is a
+// fake: no network, no pi process, no process.env reads.
 
 // ---------------------------------------------------------------------------
 // Fakes — structural subsets of pi's live ModelRegistry and completeSimple.

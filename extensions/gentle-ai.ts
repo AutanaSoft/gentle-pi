@@ -136,7 +136,6 @@ import {
 	reviewHostRelayUnachievableDetail,
 	reviewHostRelayUnachievableReason,
 	reviewProviderRoleVectorSlots,
-	resolveReviewHostRelayExtensionPaths,
 	resolveReviewHostRelaySubmission,
 	runReviewHostRelayReviewerGroup,
 	runReviewHostRelaySlot,
@@ -147,6 +146,7 @@ import {
 	type ReviewHostRelaySlot,
 	type ReviewProviderRoleVectorSlot,
 } from "../lib/review-host-relay.ts";
+import type { InProcessReviewerRegistry } from "../lib/inprocess-reviewer.ts";
 import {
 	JOURNAL_STATUS,
 	REVIEW_OPERATION,
@@ -6594,18 +6594,22 @@ function reviewHostRelayFailureReport(error: ReviewHostRelayError): Record<strin
 	};
 }
 
-// gentle-shell#1136 / #1158: the only two user-owned launch selections the
-// relay accepts. The lens's model comes from the agent model routing config
-// under the lens's agent name; the extension allowlist comes from the
-// environment. Both are optional, and neither is ever invented here.
-function reviewHostRelayLaunchSelection(lens: string | undefined, config: AgentModelConfig, environment: NodeJS.ProcessEnv): { reviewerModel?: string; reviewerExtensionPaths?: readonly string[] } {
-	const agentName = lens === undefined || lens.length === 0 ? undefined : lens.startsWith("review-") ? lens : `review-${lens}`;
-	const entry = agentName === undefined ? undefined : config[agentName];
+// gentle-pi#311 P2 (superseding gentle-shell#1136 / #1158): the lens's
+// completion selection comes from its entry in the agent model routing
+// config, keyed by its routing key (`review-<lens>`). There is no extension
+// allowlist and no ambient default model: the in-process completion resolves
+// its provider through the live model registry the caller supplies, or it is
+// refused before materialize ever runs (validateReviewerSelectionConfiguration
+// in lib/review-host-relay.ts).
+function reviewHostRelaySelection(lens: string | undefined, config: AgentModelConfig): { selection?: string; thinking?: string; routingKey: string } {
+	const routingKey = lens === undefined || lens.length === 0 ? "review capture" : lens.startsWith("review-") ? lens : `review-${lens}`;
+	const entry = config[routingKey];
 	const model = typeof entry === "object" && entry !== null && typeof (entry as AgentRoutingEntry).model === "string" && (entry as AgentRoutingEntry).model!.length > 0 ? (entry as AgentRoutingEntry).model : undefined;
-	const extensionPaths = resolveReviewHostRelayExtensionPaths(environment);
+	const thinking = typeof entry === "object" && entry !== null && typeof (entry as AgentRoutingEntry).thinking === "string" ? (entry as AgentRoutingEntry).thinking : undefined;
 	return {
-		...(model === undefined ? {} : { reviewerModel: model }),
-		...(extensionPaths.length === 0 ? {} : { reviewerExtensionPaths: extensionPaths }),
+		...(model === undefined ? {} : { selection: model }),
+		...(thinking === undefined ? {} : { thinking }),
+		routingKey,
 	};
 }
 
@@ -6708,6 +6712,7 @@ async function executeReviewHostRelayCapture(
 	selections: Map<string, RetainedNativeStatusSelection>,
 	route: RetainedNativeCaptureRoute | undefined,
 	signal?: AbortSignal,
+	modelRegistry?: InProcessReviewerRegistry,
 ): Promise<Record<string, unknown>> {
 	try {
 		if (slot.submission === undefined) {
@@ -6718,15 +6723,17 @@ async function executeReviewHostRelayCapture(
 			);
 		}
 		const result = await activeReviewHostRelayRunner((() => {
-			// gentle-shell#1136 / #1158: the lens's user-owned reviewer selection and
-			// the extension allowlist ride the request; the relay validates and
-			// refuses broken configurations typed before anything launches.
-			const launch = reviewHostRelayLaunchSelection(slot.lens, readModelConfig(cwd), process.env);
+			// gentle-pi#311 P2: the lens's user-owned completion selection rides the
+			// request alongside the live model registry; the relay validates and
+			// refuses a missing registry or a routing entry with no configured
+			// model typed before anything launches, never a fallback to a child.
+			const launch = reviewHostRelaySelection(slot.lens, readModelConfig(cwd));
 			return {
 				captureArgumentTokens: slot.captureArgumentTokens,
 				targetCwd: cwd,
 				submission: slot.submission,
 				...launch,
+				...(modelRegistry === undefined ? {} : { reviewerRegistry: modelRegistry }),
 				...(signal === undefined ? {} : { signal }),
 			};
 		})());
@@ -7323,6 +7330,11 @@ async function executeReviewCaptureOperation(
 	candidateViews: CandidateViewRegistry | null = new CandidateViewRegistry(),
 	retainedUntrackedSelections: Map<string, RetainedNativeStatusSelection> = new Map(),
 	requireRegisteredRoute = false,
+	// gentle-pi#311 P2: the live model registry a lens materialize capture
+	// resolves its in-process completion through. Appended last (rather than
+	// inserted) so every existing positional call site — none of which pass an
+	// eighth argument — keeps compiling unchanged.
+	modelRegistry?: InProcessReviewerRegistry,
 ): Promise<Record<string, unknown>> {
 	const parameters = parseReviewCaptureParameters(parametersValue);
 	if (nativeReviewCli === null || nativeReviewCli.targetStatus === undefined) {
@@ -7382,7 +7394,7 @@ async function executeReviewCaptureOperation(
 				mutation_outcome: "none",
 			};
 		}
-		return withCorrectionTarget(await executeReviewHostRelayCapture(hostRelaySlots[0]!, nativeReviewCli, cwd, selected.binding, retainedUntrackedSelections, route, signal));
+		return withCorrectionTarget(await executeReviewHostRelayCapture(hostRelaySlots[0]!, nativeReviewCli, cwd, selected.binding, retainedUntrackedSelections, route, signal, modelRegistry));
 	}
 
 	if (selected.input.captureOperation === "review.capture-correction-plan") {
@@ -7461,6 +7473,8 @@ async function executeReviewCaptureGroupOperation(
 	candidateViews: CandidateViewRegistry | null = new CandidateViewRegistry(),
 	retainedUntrackedSelections: Map<string, RetainedNativeStatusSelection> = new Map(),
 	requireRegisteredRoute = false,
+	// gentle-pi#311 P2: see executeReviewCaptureOperation's matching parameter.
+	modelRegistry?: InProcessReviewerRegistry,
 ): Promise<Record<string, unknown>> {
 	const parameters = parseReviewCaptureGroupParameters(parametersValue);
 	if (nativeReviewCli === null || nativeReviewCli.targetStatus === undefined) return { ...captureGroupRejected("native target STATUS is unavailable"), outcome: "native-status-unsupported" };
@@ -7501,7 +7515,8 @@ async function executeReviewCaptureGroupOperation(
 		captureArgumentTokens: slot.captureArgumentTokens,
 		targetCwd: cwd,
 		submission: slot.submission!,
-		...reviewHostRelayLaunchSelection(slot.lens, readModelConfig(cwd), process.env),
+		...reviewHostRelaySelection(slot.lens, readModelConfig(cwd)),
+		...(modelRegistry === undefined ? {} : { reviewerRegistry: modelRegistry }),
 		...(signal === undefined ? {} : { signal }),
 	}));
 	let prepared: readonly ReviewHostRelayPreparedResult[];
@@ -8769,6 +8784,7 @@ function createGentleAiExtensionForTesting(
 				candidateViews,
 				((sessionKey: PendingReviewConsentSessionKey) => processRetainedNativeStatusSelections.get(sessionKey) ?? processRetainedNativeStatusSelections.set(sessionKey, new Map()).get(sessionKey)!)(pendingReviewConsentSessionKey(ctx, pendingReviewConsentFallbackKey)),
 				true,
+				ctx.modelRegistry,
 			);
 			return { content: [{ type: "text", text: JSON.stringify(details) }], details };
 		},
@@ -8807,6 +8823,7 @@ function createGentleAiExtensionForTesting(
 				candidateViews,
 				((sessionKey: PendingReviewConsentSessionKey) => processRetainedNativeStatusSelections.get(sessionKey) ?? processRetainedNativeStatusSelections.set(sessionKey, new Map()).get(sessionKey)!)(pendingReviewConsentSessionKey(ctx, pendingReviewConsentFallbackKey)),
 				true,
+				ctx.modelRegistry,
 			);
 			return {
 				content: [{ type: "text", text: JSON.stringify(details) }],

@@ -2,7 +2,7 @@ import assert from "node:assert/strict";
 import { execFileSync } from "node:child_process";
 import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
-import { delimiter as pathDelimiter, join } from "node:path";
+import { join } from "node:path";
 import test from "node:test";
 import { __testing } from "../extensions/gentle-ai.ts";
 import { REVIEW_HOST_RELAY_FAILURE, ReviewHostRelayError } from "../lib/review-host-relay.ts";
@@ -187,29 +187,21 @@ test("the negotiated status asks for the pi agent so the provider offers its mat
 	assert.equal(hostRelay.transport, "pi_host_relay");
 });
 
-// gentle-shell#1136 / #1158: the lens's user-owned reviewer selection (agent
-// model routing config) and the extension allowlist environment ride the relay
-// request; without them the child runs the ambient default with no auth
-// adapters. With neither configured the launch stays selection-free.
-test("capture forwards the lens's user-owned reviewer selection and extension allowlist to the relay request", async (t) => {
+// gentle-pi#311 P2 (superseding gentle-shell#1136 / #1158): the lens's
+// user-owned completion selection (agent model routing config) rides the
+// relay request alongside the live model registry; there is no extension
+// allowlist and no ambient default model to fall back to.
+test("capture forwards the lens's user-owned selection and thinking level to the relay request", async (t) => {
 	t.after(() => __testing.setReviewHostRelayRunnerForTesting());
 	const configHome = mkdtempSync(join(tmpdir(), "gentle-pi-relay-config-"));
 	const cwd = repository(t);
 	t.after(() => rmSync(configHome, { recursive: true, force: true }));
-	writeFileSync(join(configHome, "models.json"), JSON.stringify({ "review-reliability": { model: "minimax/MiniMax-M3" } }), "utf8");
-	const adapter = join(configHome, "auth-adapter.ts");
-	const second = join(configHome, "second-adapter.ts");
-	writeFileSync(adapter, "export default () => {};");
-	writeFileSync(second, "export default () => {};");
+	writeFileSync(join(configHome, "models.json"), JSON.stringify({ "review-reliability": { model: "minimax/MiniMax-M3", thinking: "high" } }), "utf8");
 	const previousConfigHome = process.env.GENTLE_PI_CONFIG_HOME;
-	const previousExtensions = process.env.GENTLE_PI_REVIEW_RELAY_EXTENSIONS;
 	process.env.GENTLE_PI_CONFIG_HOME = configHome;
-	process.env.GENTLE_PI_REVIEW_RELAY_EXTENSIONS = [adapter, second].join(pathDelimiter);
 	t.after(() => {
 		if (previousConfigHome === undefined) delete process.env.GENTLE_PI_CONFIG_HOME;
 		else process.env.GENTLE_PI_CONFIG_HOME = previousConfigHome;
-		if (previousExtensions === undefined) delete process.env.GENTLE_PI_REVIEW_RELAY_EXTENSIONS;
-		else process.env.GENTLE_PI_REVIEW_RELAY_EXTENSIONS = previousExtensions;
 	});
 	const { native } = transportAwareNative();
 	const relayed: ReviewHostRelayRequest[] = [];
@@ -220,24 +212,30 @@ test("capture forwards the lens's user-owned reviewer selection and extension al
 
 	await runCapture(cwd, native, "selection-lineage");
 	assert.equal(relayed.length, 1);
-	assert.equal(relayed[0]!.reviewerModel, "minimax/MiniMax-M3", "the lens's routing entry must name the child's selection");
-	assert.deepEqual(relayed[0]!.reviewerExtensionPaths, [adapter, second]);
+	assert.equal(relayed[0]!.selection, "minimax/MiniMax-M3", "the lens's routing entry must name the completion's selection");
+	assert.equal(relayed[0]!.thinking, "high");
+	assert.equal(relayed[0]!.routingKey, "review-reliability");
 });
 
-test("capture keeps the relay launch selection-free when the user configured neither a selection nor extensions", async (t) => {
+// gentle-pi#311 P2 decision (flagged for confirmation): the in-process path
+// has no ambient default model. A routing entry with no configured model used
+// to launch the child selection-free (inheriting pi's own default); the real
+// relay now refuses it typed instead, since there is no child to inherit a
+// default from (lib/review-host-relay.ts's own tests exercise that refusal
+// through the real, unfaked runner). This extension layer only forwards
+// whatever the routing config yields — it never validates the selection
+// itself — so with the runner faked here the request still reaches it, and
+// its `selection` field is simply absent.
+test("capture forwards no selection when the lens has no configured model, leaving the missing-model refusal to the relay", async (t) => {
 	t.after(() => __testing.setReviewHostRelayRunnerForTesting());
 	const configHome = mkdtempSync(join(tmpdir(), "gentle-pi-relay-config-empty-"));
 	const cwd = repository(t);
 	t.after(() => rmSync(configHome, { recursive: true, force: true }));
 	const previousConfigHome = process.env.GENTLE_PI_CONFIG_HOME;
-	const previousExtensions = process.env.GENTLE_PI_REVIEW_RELAY_EXTENSIONS;
 	process.env.GENTLE_PI_CONFIG_HOME = configHome;
-	delete process.env.GENTLE_PI_REVIEW_RELAY_EXTENSIONS;
 	t.after(() => {
 		if (previousConfigHome === undefined) delete process.env.GENTLE_PI_CONFIG_HOME;
 		else process.env.GENTLE_PI_CONFIG_HOME = previousConfigHome;
-		if (previousExtensions === undefined) delete process.env.GENTLE_PI_REVIEW_RELAY_EXTENSIONS;
-		else process.env.GENTLE_PI_REVIEW_RELAY_EXTENSIONS = previousExtensions;
 	});
 	const { native } = transportAwareNative();
 	const relayed: ReviewHostRelayRequest[] = [];
@@ -248,8 +246,8 @@ test("capture keeps the relay launch selection-free when the user configured nei
 
 	await runCapture(cwd, native, "default-lineage");
 	assert.equal(relayed.length, 1);
-	assert.equal(relayed[0]!.reviewerModel, undefined);
-	assert.equal(relayed[0]!.reviewerExtensionPaths, undefined);
+	assert.equal(relayed[0]!.selection, undefined);
+	assert.equal(relayed[0]!.routingKey, "review-reliability");
 });
 
 test("a relayed empty-output failure carries the child's own evidence in the failure report", async (t) => {

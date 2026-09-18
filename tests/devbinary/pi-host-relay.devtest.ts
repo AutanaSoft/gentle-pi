@@ -7,12 +7,33 @@ import test from "node:test";
 import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
 import { __testing, createGentleAiExtension } from "../../extensions/gentle-ai.ts";
 import { resolveGentleAiBinary } from "../../lib/gentle-ai-binary.ts";
-import { OPAQUE_PI_REVIEWER_ARGV } from "../../lib/opaque-pi-reviewer-adapter.ts";
 import { NativeReviewCliV216, type ExecFileAdapter, type NativeReviewCli } from "../../lib/native-review-cli.ts";
 import { REVIEW_HOST_RELAY_FAILURE, ReviewHostRelayError, reviewHostRelaySlots, runReviewHostRelaySlot } from "../../lib/review-host-relay.ts";
 import { GENTLE_PI_REVIEW_RELAY_CONTRACT, GENTLE_PI_REVIEW_RELAY_CONTRACT_ENV } from "../../lib/review-relay-contract.ts";
 import { decodeReviewStatusV3 } from "../../lib/review-integration-v2.ts";
 import { requireDevBinary } from "../support/native-binary-gate.ts";
+
+// gentle-pi#311 P2: the opaque Pi child adapter this devtest's fake `pi`
+// binary impersonated was removed — lens captures now run one in-process
+// reviewer completion through the live model registry, with no child process
+// and no `piExecutable`/`-e` forwarding. This devtest is gated behind
+// GENTLE_PI_GENTLE_AI_DEV_BINARY (never set in ordinary CI, so `RUNNABLE`
+// stays false and its body never executes here); it still needs its own P4
+// redesign around the in-process completion path — see gentle-pi#311 P4. This
+// local constant only keeps the file self-consistent (its FAKE_POSIX_PI
+// fixture and log assertions round-trip against it) until that redesign.
+const OPAQUE_PI_REVIEWER_ARGV = Object.freeze([
+	"--print",
+	"--mode", "json",
+	"--no-session",
+	"--no-tools",
+	"--no-extension-discovery",
+	"--no-skills",
+	"--no-prompt-templates",
+	"--no-themes",
+	"--no-context-files",
+	"--no-approve",
+] as const);
 
 const DEV_BINARY = process.env.GENTLE_AI_DEV_BINARY;
 const RELAY_DEV_BINARY = process.env.GENTLE_PI_GENTLE_AI_DEV_BINARY;
@@ -391,7 +412,6 @@ test("dev-binary: POSIX Pi host relay captures one real B-target slot from an A-
 		captureArgumentTokens: slot.captureArgumentTokens,
 		submission: slot.submission,
 		targetCwd: canonicalB,
-		piExecutable: fakePi,
 		environment: {
 			...environment,
 			OPAQUE_PI_REVIEWER_ARGV: JSON.stringify(OPAQUE_PI_REVIEWER_ARGV),
@@ -477,7 +497,7 @@ test("dev-binary: a garbage reviewer result is refused at admission as a proven 
 	t.after(() => __testing.setReviewHostRelayRunnerForTesting());
 	__testing.setReviewHostRelayRunnerForTesting(async (request) => {
 		try {
-			return await runReviewHostRelaySlot({ ...request, gentleAiExecutable: RELAY_DEV_BINARY!, piExecutable: fakePi, environment, gentleAiTimeoutMs: 30_000, piTimeoutMs: 30_000 });
+			return await runReviewHostRelaySlot({ ...request, gentleAiExecutable: RELAY_DEV_BINARY!, environment, gentleAiTimeoutMs: 30_000, piTimeoutMs: 30_000 });
 		} catch (error) {
 			relayError = error;
 			throw error;
@@ -626,7 +646,6 @@ test("dev-binary: Pi controller keeps an explicit B root and selected-untracked 
 		return await runReviewHostRelaySlot({
 			...request,
 			gentleAiExecutable: RELAY_DEV_BINARY!,
-			piExecutable: fakePi,
 			environment: {
 				...environment,
 				OPAQUE_PI_REVIEWER_ARGV: JSON.stringify(OPAQUE_PI_REVIEWER_ARGV),
