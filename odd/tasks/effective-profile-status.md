@@ -35,7 +35,7 @@ Fix GitHub issue #1176 so the fullscreen Status sidebar shows the profile that g
 
 ## Evidence
 
-- T1 commit: pending commit creation
+- T1 commit: `ef07e0ef` (`fix(shell): show effective repository profile`)
 - TDD RED: the new pin test expected `other (pinned)` but observed the global `team` profile before implementation.
 - Focused tests: `node --experimental-strip-types --test tests/gentle-shell.test.ts tests/shell-bar.test.ts` — 60 passed, 0 failed; `node --experimental-strip-types --test tests/profile-pin.test.ts` — 20 passed, 0 failed.
 - Full tests: `node --experimental-strip-types --test tests/*.test.ts` — 2643 passed, 0 failed, 38 skipped.
