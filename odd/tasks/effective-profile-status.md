@@ -43,4 +43,4 @@ Fix GitHub issue #1176 so the fullscreen Status sidebar shows the profile that g
 - Runtime module check: skipped because `scripts/check-runtime-modules.mjs` does not exist on this branch.
 - Diff check: `git diff --check` — passed.
 - Verification incident: `pnpm run typecheck` was discarded as a hermetic receipt because pnpm 12 dependency verification triggered install/postinstall side effects in ignored dependency areas. Read-only Git inspection confirmed no new tracked changes; final verification used direct Node commands only.
-- Native review: pending.
+- Native review: unavailable before lineage creation. Two committed-range START attempts against `1170dc84c2198b53807431f6e03d02bf8dcc3444` were rejected with `candidate-target-projection-drift`; both reported `lineage_created: false` and performed no mutation.
