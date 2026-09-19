@@ -14,7 +14,7 @@ import { CommandPalette, commandsKey, type CommandPaletteResult } from "../lib/c
 import { buildCommandPaletteGroups } from "../lib/command-palette-catalog.ts";
 import { agentsViewKey } from "../lib/agents-keys.ts";
 import { GentleAiDevBinaryOverrideError, resolveGentleAiDevBinaryOverride } from "../lib/gentle-ai-binary.ts";
-import { DOUBLE_ESC_CANCEL_HINT, framePromptLines, PROMPT_HINT, PROMPT_STATE, SHELL_PULSE_MS, withPromptHint, type PromptState } from "../lib/shell-prompt.ts";
+import { DOUBLE_ESC_CANCEL_HINT, framePromptLines, IDLE_ESC_CLEAR_HINT, PROMPT_HINT, PROMPT_STATE, SHELL_PULSE_MS, withPromptHint, type PromptState } from "../lib/shell-prompt.ts";
 import { gentlePiConfigHome } from "../lib/agent-home.ts";
 import {
 	DOUBLE_ESC_CANCEL_WINDOW_MS,
@@ -192,9 +192,39 @@ interface PromptEditorDeps {
 	now(): number;
 	/** Read fresh on every keypress: the command handler updates this in-memory, the editor never re-reads the file. */
 	doubleEscCancelEnabled(): boolean;
+	/** Hand off text reconstructed from Pi's Esc-abort restore so it is sent as the next turn instead of sitting in the editor. */
+	dispatchQueuedText(text: string): void;
 }
 
 const PROMPT_FRAME_ROLE = "border";
+// Matches Pi's own idle double-Esc window (empty editor -> /tree or /fork);
+// this is the same muscle memory applied to clearing a non-empty draft.
+const IDLE_ESC_CLEAR_WINDOW_MS = 500;
+
+/**
+ * Pi's own Esc-abort handler (`restoreQueuedMessagesToEditor({ abort: true
+ * })`) rebuilds the editor text as
+ * `[queuedText, currentText].filter((t) => t.trim()).join("\n\n")`, where
+ * `currentText` is the draft captured just before the abort. Reverse that
+ * join to recover the queued text alone, so the draft can be restored by
+ * itself and the queued text dispatched as the next turn. `draft` is empty
+ * (including whitespace-only) whenever `.trim() === ""`, matching the
+ * `filter` predicate above exactly.
+ *
+ * Returns `""` only for the genuine no-queue case (`combined === draft`, or
+ * both empty). Returns `undefined` when `combined` does not match Pi's join
+ * shape at all — a future Pi change, or anything else that touched the
+ * editor during the abort. That distinction matters to the caller: an empty
+ * queue means "nothing to restore," while an unrecognized shape means "do
+ * not touch what Pi already wrote," so a mismatch is never silently treated
+ * as an empty queue.
+ */
+export function extractQueuedText(combined: string, draft: string): string | undefined {
+	if (combined === draft) return "";
+	if (draft.trim() === "") return combined;
+	const suffix = `\n\n${draft}`;
+	return combined.endsWith(suffix) ? combined.slice(0, combined.length - suffix.length) : undefined;
+}
 
 export class GentlePromptEditor extends CustomEditor {
 	private promptState: PromptState = PROMPT_STATE.IDLE;
@@ -206,6 +236,11 @@ export class GentlePromptEditor extends CustomEditor {
 	// whether to swallow the keystroke.
 	private readonly keybindingsManager: KeybindingsManager;
 	private pendingEscapeCancelDeadline: number | undefined;
+	private pendingIdleClearDeadline: number | undefined;
+	// Snapshot of the draft at the first Esc; the second Esc only clears when
+	// the text is still exactly this, so an edit in between never gets
+	// silently discarded (issue #1218 review).
+	private pendingIdleClearText: string | undefined;
 
 	constructor(tui: TUI, theme: EditorTheme, keybindings: KeybindingsManager, deps: PromptEditorDeps) {
 		super(tui, theme, keybindings);
@@ -216,8 +251,11 @@ export class GentlePromptEditor extends CustomEditor {
 	setWorking(working: boolean): void {
 		this.promptState = working ? PROMPT_STATE.WORKING : PROMPT_STATE.IDLE;
 		this.stopPulse();
-		if (!working) this.pendingEscapeCancelDeadline = undefined;
-		if (working) {
+		if (!working) {
+			this.pendingEscapeCancelDeadline = undefined;
+		} else {
+			this.pendingIdleClearDeadline = undefined;
+			this.pendingIdleClearText = undefined;
 			this.pulse = setInterval(() => {
 				this.tick += 1;
 				this.deps.requestRender();
@@ -232,22 +270,33 @@ export class GentlePromptEditor extends CustomEditor {
 	 * doubleEscCancelEnabled(). `pi.registerShortcut("escape")` is not viable
 	 * here: Pi reserves app.interrupt and skips colliding extension
 	 * shortcuts, so this has to sit in front of CustomEditor's own
-	 * handleInput instead. The second Esc within the window is never handled
-	 * here: it falls straight through to `super.handleInput`, which runs
-	 * Pi's own onEscape and performs the actual abort. Idle double-Esc
-	 * (tree/fork), bash-mode Esc, and autocomplete cancel are all decided by
-	 * CustomEditor/onEscape and never reach this branch.
+	 * handleInput instead. The Esc that actually aborts the turn (the single
+	 * Esc when double-esc-cancel is off, or the confirming second Esc when
+	 * it is on) always goes through abortAndDispatchQueued so the queued
+	 * text Pi would otherwise dump back into the editor is sent as the next
+	 * turn instead (issue #1218). Idle double-Esc (tree/fork), bash-mode
+	 * Esc, and autocomplete cancel are all decided by CustomEditor/onEscape
+	 * and never reach this branch.
 	 */
 	override handleInput(data: string): void {
+		// Any keystroke that is not the confirming Esc ends the pending idle
+		// clear, even one that leaves the text identical (type, then delete).
+		if (this.pendingIdleClearDeadline !== undefined && !this.keybindingsManager.matches(data, "app.interrupt")) {
+			this.pendingIdleClearDeadline = undefined;
+			this.pendingIdleClearText = undefined;
+		}
 		if (
 			this.promptState === PROMPT_STATE.WORKING &&
 			!this.isShowingAutocomplete() &&
-			this.deps.doubleEscCancelEnabled() &&
 			this.keybindingsManager.matches(data, "app.interrupt")
 		) {
+			if (!this.deps.doubleEscCancelEnabled()) {
+				this.abortAndDispatchQueued(data);
+				return;
+			}
 			if (this.isPendingEscapeCancel()) {
 				this.pendingEscapeCancelDeadline = undefined;
-				super.handleInput(data);
+				this.abortAndDispatchQueued(data);
 				return;
 			}
 			// Pi's own idle double-Esc (empty editor -> /tree or /fork) uses a
@@ -257,7 +306,69 @@ export class GentlePromptEditor extends CustomEditor {
 			this.deps.requestRender();
 			return;
 		}
+		// Idle with a non-empty draft: Pi's own idle double-Esc only acts on an
+		// empty editor (tree/fork), so a draft's first Esc would otherwise do
+		// nothing. Mirror the same swallow-then-confirm shape as the
+		// working-cancel gate above, on the same 500ms window as Pi's own idle
+		// double-Esc (issue #1218). Bash-mode drafts ("!...", the same rule
+		// Pi's own interactive-mode uses to detect bash mode) are Pi's own
+		// bash-mode Esc territory and must never reach this gate.
+		if (
+			this.promptState === PROMPT_STATE.IDLE &&
+			!this.isShowingAutocomplete() &&
+			this.keybindingsManager.matches(data, "app.interrupt")
+		) {
+			const text = this.getText();
+			if (text.trim() !== "" && !text.trimStart().startsWith("!")) {
+				// The second Esc only clears when the text is still exactly what
+				// it was at the first Esc; an edit in between starts a fresh
+				// first press on the new text instead of silently discarding it.
+				if (this.isPendingIdleClear() && this.pendingIdleClearText === text) {
+					this.pendingIdleClearDeadline = undefined;
+					this.pendingIdleClearText = undefined;
+					this.addToHistory(text);
+					this.setText("");
+					this.deps.requestRender();
+					return;
+				}
+				this.pendingIdleClearDeadline = this.deps.now() + IDLE_ESC_CLEAR_WINDOW_MS;
+				this.pendingIdleClearText = text;
+				this.deps.requestRender();
+				return;
+			}
+		}
 		super.handleInput(data);
+	}
+
+	/**
+	 * Runs the Esc that actually aborts the turn. Pi's own onEscape (invoked
+	 * synchronously by `super.handleInput`) restores `queuedText + draft`
+	 * into the editor and aborts; snapshot the draft first, reconstruct the
+	 * queued text from what comes back, restore the draft alone, and hand
+	 * the queued text to the dispatcher so it is sent once the aborted run
+	 * settles (see the `agent_settled` handler in `gentleShell`). Images
+	 * inside queued messages are already dropped by Pi's own restore, before
+	 * this code ever sees the text.
+	 *
+	 * `extractQueuedText` returning `undefined` means the restored text does
+	 * not match Pi's own join shape; Pi's own text wins and is left exactly
+	 * as it is, nothing is dispatched. An empty string means a genuine empty
+	 * queue: there is nothing to restore, so `setText` is not called at all
+	 * on the common no-queue path. Only a recognized, non-empty queue
+	 * restores the draft and dispatches.
+	 */
+	private abortAndDispatchQueued(data: string): void {
+		const draft = this.getText();
+		super.handleInput(data);
+		const queued = extractQueuedText(this.getText(), draft);
+		// undefined: unrecognized shape, Pi's own text stays untouched.
+		if (queued === undefined) return;
+		// "": nothing was queued, and the editor already holds the draft, so no
+		// redundant write. Anything else was recognized: the draft comes back
+		// alone, and only real text (not whitespace) is worth a turn.
+		if (queued !== "") this.setText(draft);
+		if (queued.trim() === "") return;
+		this.deps.dispatchQueuedText(queued);
 	}
 
 	render(width: number): string[] {
@@ -272,7 +383,11 @@ export class GentlePromptEditor extends CustomEditor {
 			borderColor: (text) => this.deps.fg(PROMPT_FRAME_ROLE, text),
 			fg: this.deps.fg,
 			bold: this.deps.bold,
-			escHint: this.promptState === PROMPT_STATE.WORKING && this.isPendingEscapeCancel() ? DOUBLE_ESC_CANCEL_HINT : undefined,
+			escHint: this.promptState === PROMPT_STATE.WORKING && this.isPendingEscapeCancel()
+				? DOUBLE_ESC_CANCEL_HINT
+				: this.promptState === PROMPT_STATE.IDLE && this.isPendingIdleClear()
+					? IDLE_ESC_CLEAR_HINT
+					: undefined,
 		});
 	}
 
@@ -282,6 +397,14 @@ export class GentlePromptEditor extends CustomEditor {
 
 	private isPendingEscapeCancel(): boolean {
 		return this.pendingEscapeCancelDeadline !== undefined && this.deps.now() < this.pendingEscapeCancelDeadline;
+	}
+
+	private isPendingIdleClear(): boolean {
+		return (
+			this.pendingIdleClearDeadline !== undefined &&
+			this.deps.now() < this.pendingIdleClearDeadline &&
+			this.pendingIdleClearText === this.getText()
+		);
 	}
 
 	private stopPulse(): void {
@@ -298,7 +421,7 @@ type PromptFactory = NonNullable<ReturnType<ExtensionContext["ui"]["getEditorCom
 function installPrompt(
 	ctx: ExtensionContext,
 	onCreated: (prompt: GentlePromptEditor) => void,
-	promptDeps: { now: () => number; doubleEscCancelEnabled: () => boolean },
+	promptDeps: { now: () => number; doubleEscCancelEnabled: () => boolean; dispatchQueuedText: (text: string) => void },
 ): boolean {
 	const previous = ctx.ui.getEditorComponent() as PromptFactory | undefined;
 	if (previous && !previous[PROMPT_OWNER]) return false;
@@ -310,6 +433,7 @@ function installPrompt(
 			pending: () => ctx.hasPendingMessages(),
 			now: promptDeps.now,
 			doubleEscCancelEnabled: promptDeps.doubleEscCancelEnabled,
+			dispatchQueuedText: promptDeps.dispatchQueuedText,
 		});
 		onCreated(prompt);
 		return prompt;
@@ -680,6 +804,13 @@ export default function gentleShell(pi: ExtensionAPI, env: NodeJS.ProcessEnv = p
 		});
 	}
 	let prompt: GentlePromptEditor | undefined;
+	// Set by abortAndDispatchQueued via dispatchQueuedText when an Esc aborts
+	// a turn with a non-empty queue; sent exactly once, from agent_settled,
+	// once the aborted run has fully settled (issue #1218). Several aborts
+	// before that settle append in order, joined the way Pi joins its own
+	// queue, so nothing is overwritten. It belongs to the current session and
+	// is dropped on session_shutdown.
+	let pendingQueuedText: string | undefined;
 	// Resolved once at startup and cached in memory so the editor never
 	// re-reads the file per keypress. The /gentle:double-esc-cancel command
 	// below is the only place that touches the file, and every invocation
@@ -778,7 +909,7 @@ export default function gentleShell(pi: ExtensionAPI, env: NodeJS.ProcessEnv = p
 				prompt?.dispose();
 				prompt = created;
 			},
-			{ now: () => deps.now(), doubleEscCancelEnabled: () => doubleEscCancelPolicy === "on" },
+			{ now: () => deps.now(), doubleEscCancelEnabled: () => doubleEscCancelPolicy === "on", dispatchQueuedText: (text) => { pendingQueuedText = pendingQueuedText === undefined ? text : `${pendingQueuedText}\n\n${text}`; } },
 		);
 		// Hide native feedback only when our petal replaces it. Native transcript
 		// thinking blocks remain Pi-owned; this changes only the supported loader UI.
@@ -795,6 +926,7 @@ export default function gentleShell(pi: ExtensionAPI, env: NodeJS.ProcessEnv = p
 		applyChanges(ctx, tracker.model);
 	});
 	pi.on("session_shutdown", (_event, ctx) => {
+		pendingQueuedText = undefined;
 		prompt?.dispose();
 		prompt = undefined;
 		if ((ctx.ui.getEditorComponent() as PromptFactory | undefined)?.[PROMPT_OWNER]) {
@@ -875,12 +1007,37 @@ export default function gentleShell(pi: ExtensionAPI, env: NodeJS.ProcessEnv = p
 		},
 	});
 	pi.on("agent_start", (_event, ctx) => {
+		// A turn can start any other way (the user sending the draft, an
+		// extension, a shortcut) before the aborted run's own agent_settled
+		// below has delivered the pending text. Nothing is sent from here: Pi
+		// is mid-turn, so the text simply waits and goes out, once, when that
+		// turn settles. It is never dropped.
 		prompt?.setWorking(true);
 		// The dev-binary card is a startup notice: it leaves with the first prompt.
 		if (ctx.hasUI) ctx.ui.setWidget(DEV_BINARY_WIDGET_KEY, undefined);
 	});
-	pi.on("agent_settled", () => {
+	pi.on("agent_settled", (_event, ctx) => {
+		// Pi clears its own run-active flag before emitting agent_settled, so
+		// this is normally idle; if a run is somehow still in flight the prompt
+		// stays working and the pending text waits for the next settle.
+		if (!ctx.isIdle()) return;
 		prompt?.setWorking(false);
+		if (pendingQueuedText === undefined) return;
+		const queued = pendingQueuedText;
+		pendingQueuedText = undefined;
+		try {
+			pi.sendUserMessage(queued);
+		} catch (error) {
+			// Never drop the user's words: put them back in front of the draft,
+			// exactly the shape Pi's own restore would have left, and say why.
+			if (prompt) {
+				const current = prompt.getText();
+				prompt.setText([queued, current].filter((text) => text.trim() !== "").join("\n\n"));
+			} else {
+				pendingQueuedText = queued;
+			}
+			if (ctx.hasUI) ctx.ui.notify(`Could not send the queued message after cancel; it is back in the editor: ${error instanceof Error ? error.message : String(error)}`, "error");
+		}
 	});
 	pi.on("agent_end", async (_event, ctx) => {
 		await refreshChanges(ctx);
