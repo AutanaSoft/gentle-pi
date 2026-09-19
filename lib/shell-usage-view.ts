@@ -1,6 +1,6 @@
 import { Key, matchesKey, truncateToWidth, visibleWidth, type TuiMouseEvent, type TuiMouseEventResult } from "@earendil-works/pi-tui";
 import { renderUsagePanel, type ActiveProvider, type UsageStore, type UsageTheme } from "./shell-usage.ts";
-import { HOVER_ROLE } from "./shell-hover.ts";
+import { paintHoverable } from "./shell-hover.ts";
 
 // Gentle Shell subscriptions overlay: a framed panel over the usage store.
 // It reads the store on every render, so a refresh only needs to record.
@@ -106,7 +106,9 @@ export class UsageView {
 		// label together, one color) instead of its ordinary two-role split --
 		// the same treatment every other clickable surface uses.
 		const keys = hints
-			.map(({ key, label, action }) => (this.hoveredHint === action ? theme.fg(HOVER_ROLE, `${key} ${label}`) : `${theme.fg(KEY_ROLE, key)} ${theme.fg(KEY_TEXT_ROLE, label)}`))
+			.map(({ key, label, action }) =>
+				this.hoveredHint === action ? paintHoverable(theme, `${key} ${label}`, true) : `${theme.fg(KEY_ROLE, key)} ${theme.fg(KEY_TEXT_ROLE, label)}`,
+			)
 			.join(HINT_GAP);
 		const keysLine = `${theme.fg(FRAME_ROLE, "│")} ${fit(keys, inner - 2)} ${theme.fg(FRAME_ROLE, "│")}`;
 		const bottom = theme.fg(FRAME_ROLE, `╰${rule(inner)}╯`);
@@ -146,17 +148,15 @@ export class UsageView {
 	// Spans are only registered when the hints text fits without truncation:
 	// past that point `fit` clips it with an ellipsis and per-hint columns no
 	// longer line up with the plain "key label" text used here.
-	private hintLayout(width: number, height: number, row: number, hints: Array<{ text: string }>, contentWidth: number): PointerLayout | undefined {
+	private hintLayout(width: number, height: number, row: number, hints: Array<{ text: string; action: HintAction }>, contentWidth: number): PointerLayout | undefined {
 		const plainWidth = hints.reduce((total, hint) => total + hint.text.length, 0) + HINT_GAP.length * Math.max(0, hints.length - 1);
 		if (plainWidth > contentWidth) return undefined;
 		const spans: HintSpan[] = [];
 		let cursor = HINT_CONTENT_OFFSET;
-		for (let index = 0; index < KEYS.length; index += 1) {
-			const [key] = KEYS[index]!;
-			const text = hints[index]!.text;
+		for (const hint of hints) {
 			const start = cursor;
-			const end = start + text.length;
-			spans.push({ start, end, action: key === "r" ? "refresh" : "close" });
+			const end = start + hint.text.length;
+			spans.push({ start, end, action: hint.action });
 			cursor = end + HINT_GAP.length;
 		}
 		return { width, height, row, spans };
