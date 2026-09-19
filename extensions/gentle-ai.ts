@@ -133,11 +133,11 @@ import {
 	REVIEW_HOST_RELAY_SUBMISSION_MISSING_MESSAGE,
 	REVIEW_HOST_RELAY_UNAVAILABLE_MESSAGE,
 	ReviewHostRelayError,
+	reviewHostMediatedRoleSlots,
 	reviewHostRelaySlots,
 	reviewHostRelayUnachievableDetail,
 	reviewHostRelayUnachievableReason,
 	reviewProviderRoleVectorSlots,
-	resolveReviewHostRelayExtensionPaths,
 	resolveReviewHostRelaySubmission,
 	runReviewHostRelayReviewerGroup,
 	runReviewHostRelaySlot,
@@ -148,6 +148,7 @@ import {
 	type ReviewHostRelaySlot,
 	type ReviewProviderRoleVectorSlot,
 } from "../lib/review-host-relay.ts";
+import type { InProcessReviewerRegistry } from "../lib/inprocess-reviewer.ts";
 import {
 	JOURNAL_STATUS,
 	REVIEW_OPERATION,
@@ -6595,18 +6596,22 @@ function reviewHostRelayFailureReport(error: ReviewHostRelayError): Record<strin
 	};
 }
 
-// gentle-shell#1136 / #1158: the only two user-owned launch selections the
-// relay accepts. The lens's model comes from the agent model routing config
-// under the lens's agent name; the extension allowlist comes from the
-// environment. Both are optional, and neither is ever invented here.
-function reviewHostRelayLaunchSelection(lens: string | undefined, config: AgentModelConfig, environment: NodeJS.ProcessEnv): { reviewerModel?: string; reviewerExtensionPaths?: readonly string[] } {
-	const agentName = lens === undefined || lens.length === 0 ? undefined : lens.startsWith("review-") ? lens : `review-${lens}`;
-	const entry = agentName === undefined ? undefined : config[agentName];
+// gentle-pi#311 P2 (superseding gentle-shell#1136 / #1158): the lens's
+// completion selection comes from its entry in the agent model routing
+// config, keyed by its routing key (`review-<lens>`). There is no extension
+// allowlist and no ambient default model: the in-process completion resolves
+// its provider through the live model registry the caller supplies, or it is
+// refused before materialize ever runs (validateReviewerSelectionConfiguration
+// in lib/review-host-relay.ts).
+function reviewHostRelaySelection(lens: string | undefined, config: AgentModelConfig): { selection?: string; thinking?: string; routingKey: string } {
+	const routingKey = lens === undefined || lens.length === 0 ? "review capture" : lens.startsWith("review-") ? lens : `review-${lens}`;
+	const entry = config[routingKey];
 	const model = typeof entry === "object" && entry !== null && typeof (entry as AgentRoutingEntry).model === "string" && (entry as AgentRoutingEntry).model!.length > 0 ? (entry as AgentRoutingEntry).model : undefined;
-	const extensionPaths = resolveReviewHostRelayExtensionPaths(environment);
+	const thinking = typeof entry === "object" && entry !== null && typeof (entry as AgentRoutingEntry).thinking === "string" ? (entry as AgentRoutingEntry).thinking : undefined;
 	return {
-		...(model === undefined ? {} : { reviewerModel: model }),
-		...(extensionPaths.length === 0 ? {} : { reviewerExtensionPaths: extensionPaths }),
+		...(model === undefined ? {} : { selection: model }),
+		...(thinking === undefined ? {} : { thinking }),
+		routingKey,
 	};
 }
 
@@ -6709,6 +6714,7 @@ async function executeReviewHostRelayCapture(
 	selections: Map<string, RetainedNativeStatusSelection>,
 	route: RetainedNativeCaptureRoute | undefined,
 	signal?: AbortSignal,
+	modelRegistry?: InProcessReviewerRegistry,
 ): Promise<Record<string, unknown>> {
 	try {
 		if (slot.submission === undefined) {
@@ -6719,15 +6725,19 @@ async function executeReviewHostRelayCapture(
 			);
 		}
 		const result = await activeReviewHostRelayRunner((() => {
-			// gentle-shell#1136 / #1158: the lens's user-owned reviewer selection and
-			// the extension allowlist ride the request; the relay validates and
-			// refuses broken configurations typed before anything launches.
-			const launch = reviewHostRelayLaunchSelection(slot.lens, readModelConfig(cwd), process.env);
+			// gentle-pi#311 P2 / P3: the lens's (or, for a v9 host-mediated role
+			// slot, the fixed review-refuter/review-validator routing key's)
+			// user-owned completion selection rides the request alongside the
+			// live model registry; the relay validates and refuses a missing
+			// registry or a routing entry with no configured model typed before
+			// anything launches, never a fallback to a child.
+			const launch = reviewHostRelaySelection(slot.routingKey ?? slot.lens, readModelConfig(cwd));
 			return {
 				captureArgumentTokens: slot.captureArgumentTokens,
 				targetCwd: cwd,
 				submission: slot.submission,
 				...launch,
+				...(modelRegistry === undefined ? {} : { reviewerRegistry: modelRegistry }),
 				...(signal === undefined ? {} : { signal }),
 			};
 		})());
@@ -6743,6 +6753,7 @@ async function executeReviewHostRelayCapture(
 				...(slot.lens === undefined ? {} : { lens: slot.lens }),
 				...(slot.order === undefined ? {} : { order: slot.order }),
 				...(slot.subjectHash === undefined ? {} : { subject_hash: slot.subjectHash }),
+				...(slot.routingKey === undefined ? {} : { role: slot.name }),
 				prompt_bytes: result.promptByteLength,
 				result_bytes: result.resultByteLength,
 				submission: result.submission,
@@ -7324,6 +7335,11 @@ async function executeReviewCaptureOperation(
 	candidateViews: CandidateViewRegistry | null = new CandidateViewRegistry(),
 	retainedUntrackedSelections: Map<string, RetainedNativeStatusSelection> = new Map(),
 	requireRegisteredRoute = false,
+	// gentle-pi#311 P2: the live model registry a lens materialize capture
+	// resolves its in-process completion through. Appended last (rather than
+	// inserted) so every existing positional call site — none of which pass an
+	// eighth argument — keeps compiling unchanged.
+	modelRegistry?: InProcessReviewerRegistry,
 ): Promise<Record<string, unknown>> {
 	const parameters = parseReviewCaptureParameters(parametersValue);
 	if (nativeReviewCli === null || nativeReviewCli.targetStatus === undefined) {
@@ -7383,7 +7399,33 @@ async function executeReviewCaptureOperation(
 				mutation_outcome: "none",
 			};
 		}
-		return withCorrectionTarget(await executeReviewHostRelayCapture(hostRelaySlots[0]!, nativeReviewCli, cwd, selected.binding, retainedUntrackedSelections, route, signal));
+		return withCorrectionTarget(await executeReviewHostRelayCapture(hostRelaySlots[0]!, nativeReviewCli, cwd, selected.binding, retainedUntrackedSelections, route, signal, modelRegistry));
+	}
+
+	// gentle-pi#311 P3: gentle-ai's v9 contract renders the refuter and
+	// targeted-validator role captures host-mediated, exactly like the lens
+	// slot above — same relay machinery, only its fixed review-refuter /
+	// review-validator routing key (carried on the slot) and its own schema
+	// differ. An older gentle-ai's self-contained --execute=true vector still
+	// falls through to reviewProviderRoleVectorSlots below unchanged.
+	const hostMediatedRoleSlots = reviewHostMediatedRoleSlots([selected.input]);
+	if (hostMediatedRoleSlots.length === 1) {
+		if (parameters.correctionLines !== undefined) return captureBindingRejected("correctionLines is valid only for a correction-plan capture");
+		if (parameters.reviewerRunAcknowledged !== true) {
+			return {
+				tool: "gentle_review_capture",
+				status: "blocked",
+				outcome: "reviewer-model-run-forecast",
+				cost_forecast: {
+					transport: "pi_host_relay",
+					model_runs: 1,
+					roles: [hostMediatedRoleSlots[0]!.routingKey],
+				},
+				mutation_performed: false,
+				mutation_outcome: "none",
+			};
+		}
+		return withCorrectionTarget(await executeReviewHostRelayCapture(hostMediatedRoleSlots[0]!, nativeReviewCli, cwd, selected.binding, retainedUntrackedSelections, route, signal, modelRegistry));
 	}
 
 	if (selected.input.captureOperation === "review.capture-correction-plan") {
@@ -7462,6 +7504,8 @@ async function executeReviewCaptureGroupOperation(
 	candidateViews: CandidateViewRegistry | null = new CandidateViewRegistry(),
 	retainedUntrackedSelections: Map<string, RetainedNativeStatusSelection> = new Map(),
 	requireRegisteredRoute = false,
+	// gentle-pi#311 P2: see executeReviewCaptureOperation's matching parameter.
+	modelRegistry?: InProcessReviewerRegistry,
 ): Promise<Record<string, unknown>> {
 	const parameters = parseReviewCaptureGroupParameters(parametersValue);
 	if (nativeReviewCli === null || nativeReviewCli.targetStatus === undefined) return { ...captureGroupRejected("native target STATUS is unavailable"), outcome: "native-status-unsupported" };
@@ -7502,7 +7546,8 @@ async function executeReviewCaptureGroupOperation(
 		captureArgumentTokens: slot.captureArgumentTokens,
 		targetCwd: cwd,
 		submission: slot.submission!,
-		...reviewHostRelayLaunchSelection(slot.lens, readModelConfig(cwd), process.env),
+		...reviewHostRelaySelection(slot.lens, readModelConfig(cwd)),
+		...(modelRegistry === undefined ? {} : { reviewerRegistry: modelRegistry }),
 		...(signal === undefined ? {} : { signal }),
 	}));
 	let prepared: readonly ReviewHostRelayPreparedResult[];
@@ -8775,6 +8820,7 @@ function createGentleAiExtensionForTesting(
 				candidateViews,
 				((sessionKey: PendingReviewConsentSessionKey) => processRetainedNativeStatusSelections.get(sessionKey) ?? processRetainedNativeStatusSelections.set(sessionKey, new Map()).get(sessionKey)!)(pendingReviewConsentSessionKey(ctx, pendingReviewConsentFallbackKey)),
 				true,
+				ctx.modelRegistry,
 			);
 			return { content: [{ type: "text", text: JSON.stringify(details) }], details };
 		},
@@ -8788,7 +8834,7 @@ function createGentleAiExtensionForTesting(
 		promptSnippet: "Use one exact current STATUS collectBinding for one ordinary native capture; call fresh STATUS before every additional capture.",
 		promptGuidelines: [
 			"Pass only lineageId, the JSON-serialized exact collectBinding from current STATUS, and the route-specific optional acknowledgement or correctionLines value. Never compose provider argument tokens, prompts, results, verdicts, or lens arrays.",
-			"A materialize reviewer slot first forecasts one model run; re-submit that same exact binding with reviewerRunAcknowledged: true to authorize one host relay. Correction-plan slots require correctionLines inside the provider-issued bounds, counted in diff lines (one replaced source line is one deletion plus one addition) — a different unit from the frozen logical correction budget. Refuter and validation vectors execute exactly once as provider-rendered.",
+			"A materialize reviewer slot first forecasts one model run; re-submit that same exact binding with reviewerRunAcknowledged: true to authorize one host relay. Correction-plan slots require correctionLines inside the provider-issued bounds, counted in diff lines (one replaced source line is one deletion plus one addition) — a different unit from the frozen logical correction budget. A refuter or targeted-validator slot forecasts and runs the same way when the provider renders it host-mediated; an older provider's self-contained refuter/validation vector still executes exactly once as provider-rendered.",
 			"A native terminal closure or nonterminal capture returns directly. Do not expect automatic STATUS, FINALIZE, receipt, delivery, or another capture; call fresh STATUS before any next capture.",
 		],
 		parameters: REVIEW_CAPTURE_PARAMETERS,
@@ -8813,6 +8859,7 @@ function createGentleAiExtensionForTesting(
 				candidateViews,
 				((sessionKey: PendingReviewConsentSessionKey) => processRetainedNativeStatusSelections.get(sessionKey) ?? processRetainedNativeStatusSelections.set(sessionKey, new Map()).get(sessionKey)!)(pendingReviewConsentSessionKey(ctx, pendingReviewConsentFallbackKey)),
 				true,
+				ctx.modelRegistry,
 			);
 			return {
 				content: [{ type: "text", text: JSON.stringify(details) }],
