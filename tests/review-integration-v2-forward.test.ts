@@ -440,6 +440,31 @@ test("capabilities/v2.5 negotiates the v2.6.0 advertisement and status/v7 decode
 	assert.throws(() => decodeReviewStatusV3(v6WithDigest), /eligible_untracked_inventory/);
 });
 
+// status/v8 (gentle-ai main, PR #4765; the current released contract) only
+// extended the reviewer-result transition for OpenCode provider tasks -- no
+// new top-level key -- so it decodes on the exact v7 surface: same optional
+// eligible_untracked_inventory digest, same rejection of a v6 envelope
+// carrying it. status/v9 (the sibling gentle-ai branch's contract, ahead of
+// the released v8) adds nothing new at the top level either; its one
+// addition -- the host-mediated role submission -- lives in
+// next_transition.collect.inputs and is covered by
+// tests/review-integration-v2.test.ts's "v9 host-mediated" tests.
+test("status/v8 and status/v9 decode with their exact identity on the v7 surface", () => {
+	const v8 = initialIntendedUntrackedStatusV6();
+	v8.schema = "gentle-ai.review-integration.status/v8";
+	v8.eligible_untracked_inventory = sha("e");
+	const decodedV8 = decodeReviewStatusV3(v8);
+	assert.equal(decodedV8.raw.schema, "gentle-ai.review-integration.status/v8");
+	assert.equal(decodedV8.eligibleUntrackedInventory, sha("e"));
+
+	const v9 = initialIntendedUntrackedStatusV6();
+	v9.schema = "gentle-ai.review-integration.status/v9";
+	v9.eligible_untracked_inventory = sha("e");
+	const decodedV9 = decodeReviewStatusV3(v9);
+	assert.equal(decodedV9.raw.schema, "gentle-ai.review-integration.status/v9");
+	assert.equal(decodedV9.eligibleUntrackedInventory, sha("e"));
+});
+
 test("status/v6 decodes and enforces the intended-untracked selection submission", () => {
 	const decoded = decodeReviewStatusV3(initialIntendedUntrackedStatusV6());
 	const input = decoded.nextTransition?.collect?.inputs[0];

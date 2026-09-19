@@ -1,9 +1,9 @@
 import assert from "node:assert/strict";
 import { randomUUID } from "node:crypto";
 import { execFileSync } from "node:child_process";
-import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, realpathSync, rmSync, writeFileSync } from "node:fs";
+import { chmodSync, existsSync, mkdirSync, mkdtempSync, readdirSync, realpathSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
-import { delimiter, join, resolve } from "node:path";
+import { join, resolve } from "node:path";
 import test from "node:test";
 import type { Api, AssistantMessage, Context, Model } from "@earendil-works/pi-ai";
 import { fauxAssistantMessage, registerFauxProvider } from "@earendil-works/pi-ai/compat";
@@ -17,15 +17,16 @@ import { GENTLE_PI_REVIEW_RELAY_CONTRACT, GENTLE_PI_REVIEW_RELAY_CONTRACT_ENV } 
 import { decodeReviewStatusV3 } from "../../lib/review-integration-v2.ts";
 import { requireDevBinary } from "../support/native-binary-gate.ts";
 
-// gentle-pi#311 P4: lens captures now run one in-process reviewer completion
+// gentle-pi#311 P4 / P3: lens captures run one in-process reviewer completion
 // through the live model registry (lib/inprocess-reviewer.ts), with no child
-// process, no `piExecutable`/`-e` forwarding, and no extension allowlist. The
-// devtests below inject a fake reviewer registry (`fauxReviewerFor`) instead
-// of a fake `pi` binary for that leg. The Go-owned targeted-validator role
-// vector (`review.capture-validation --agent=pi --execute=true`) is
-// self-contained and still spawns a real `pi` on PATH directly from the
-// native gentle-ai binary — that role is unrelated to this leg and stays out
-// of scope here (gentle-pi#311 P3).
+// process, no `piExecutable`/`-e` forwarding, and no extension allowlist.
+// gentle-ai's v9 contract makes the refuter and targeted-validator role
+// captures host-mediated the same way (P3): each carries a submission
+// descriptor alongside `--materialize=true`, runs through the SAME relay
+// seam, and reaches the SAME `fauxReviewerFor` fixture — there is no
+// Go-owned `pi` subprocess left to fake on PATH for either role. The devtests
+// below inject a fake reviewer registry instead of a fake `pi` binary for
+// every one of these legs.
 
 // ---------------------------------------------------------------------------
 // Fake reviewer registry (gentle-pi#311 P4) — registers pi-ai's own faux
@@ -318,28 +319,6 @@ function grantedConsentInvocation(value: unknown): string {
 	return stringValue(granted!.invocation, "granted consent invocation");
 }
 
-// gentle-pi#311 P4: this fixture used to serve two roles: the lens reviewer
-// capture (spawned by our own TS relay, now replaced by `fauxReviewerFor`)
-// and the Go-owned targeted-validator vector (spawned directly by the native
-// gentle-ai binary via `review.capture-validation --agent=pi --execute=true`,
-// unrelated to this leg and unchanged — gentle-pi#311 P3). Only the second
-// role remains reachable, so the reviewer branch is gone.
-const FAKE_POSIX_PI = `#!/usr/bin/env node
-import fs from "node:fs";
-const chunks = [];
-process.stdin.on("data", (chunk) => chunks.push(chunk));
-process.stdin.on("end", () => {
-  const promptText = Buffer.concat(chunks).toString("utf8");
-  const targetedValidatorResult = process.env.OPAQUE_PI_TARGETED_VALIDATOR_RESULT;
-  if (targetedValidatorResult === undefined || promptText.length === 0) throw new Error("missing targeted-validator prompt");
-  const prior = fs.existsSync(process.env.OPAQUE_PI_REVIEWER_LOG) ? JSON.parse(fs.readFileSync(process.env.OPAQUE_PI_REVIEWER_LOG, "utf8")) : { calls: [] };
-  const calls = Array.isArray(prior.calls) ? prior.calls : [];
-  calls.push({ argv: process.argv.slice(2), cwd: process.cwd(), entries: fs.readdirSync(process.cwd()), prompt: promptText, role: "targeted-validator" });
-  fs.writeFileSync(process.env.OPAQUE_PI_REVIEWER_LOG, JSON.stringify({ calls }));
-  process.stdout.write(targetedValidatorResult);
-});
-`;
-
 // This A -> B journey deliberately stops immediately after one Go-admitted
 // reviewer capture. It proves real Pi relay transport and root continuity, but
 // does not manufacture the remaining reviewer, refuter, validator, or approval
@@ -552,9 +531,10 @@ test("dev-binary: a garbage reviewer result is refused at admission as a proven 
 });
 
 // This completes the same organic A -> B path through correction evidence,
-// Go-owned targeted validation, and terminal approval. The only reviewer is the
-// fixed fake Pi executable below; no model, provider, or profile is selected.
-test("dev-binary: Pi controller keeps an explicit B root and selected-untracked binding through Go-owned validation approval", { skip: !RUNNABLE }, async (t) => {
+// host-mediated targeted validation, and terminal approval. The only
+// reviewers are the fixed faux registries below; no real model, provider, or
+// profile is selected.
+test("dev-binary: Pi controller keeps an explicit B root and selected-untracked binding through host-mediated validation approval", { skip: !RUNNABLE }, async (t) => {
 	const sessionA = repository(t, "gentle-pi-combined-session-a-");
 	const targetB = repository(t, "gentle-pi-combined-target-b-");
 	const nestedTarget = join(targetB, "nested", "target");
@@ -638,18 +618,6 @@ test("dev-binary: Pi controller keeps an explicit B root and selected-untracked 
 	assert.equal(startedDetails.workspace_root, canonicalB);
 	const lineage = stringValue(record(startedDetails.result, "combined start result").lineage_id, "combined lineage");
 
-	// gentle-pi#311 P3 (out of scope here): the Go-owned targeted-validator
-	// role vector is self-contained and still spawns a real `pi` on PATH
-	// directly from the native gentle-ai binary, so this fixture and its PATH
-	// installation stay exactly as they were for that leg.
-	const fakePiDirectory = join(sessionA, "fake-pi-bin");
-	mkdirSync(fakePiDirectory);
-	const fakePi = join(fakePiDirectory, "pi");
-	const fakePiLog = join(sessionA, "fake-pi-log.json");
-	writeFileSync(fakePi, FAKE_POSIX_PI);
-	chmodSync(fakePi, 0o755);
-	environment.PATH = [fakePiDirectory, process.env.PATH].filter((entry): entry is string => entry !== undefined && entry.length > 0).join(delimiter);
-	environment.OPAQUE_PI_REVIEWER_LOG = fakePiLog;
 	const reviewerFindings = [{
 		location: "selected.txt:1",
 		severity: "BLOCKER",
@@ -658,20 +626,38 @@ test("dev-binary: Pi controller keeps an explicit B root and selected-untracked 
 		evidence_class: "deterministic",
 		causal_disposition: "introduced",
 	}];
-	// gentle-pi#311 P4: the lens reviewer capture runs in-process through a
-	// fake registry instead of the fake `pi` binary above (which now serves
-	// only the Go-owned targeted-validator leg).
+	// gentle-pi#311 P4 / P3: the lens reviewer capture runs in-process through
+	// a fake registry. gentle-ai's v9 contract makes the targeted-validator
+	// role host-mediated too (there is no Go-owned pi subprocess left to fake
+	// on PATH for it), so it reaches the SAME relay seam below through its own
+	// faux reviewer, armed once its request-hash and target identity are
+	// known further down.
 	const reviewer = fauxReviewerFor((subjectHash) => JSON.stringify({
 		subject_hash: subjectHash,
 		inspection: { status: "completed", paths: [".github/workflows/relay.yml", "selected.txt"] },
 		findings: reviewerFindings,
 		evidence: ["inspected every frozen candidate path"],
 	}));
+	let validatorReviewer: ReturnType<typeof fauxReviewerFor> | undefined;
 	const relayTargetRoots: string[] = [];
 	t.after(() => __testing.setReviewHostRelayRunnerForTesting());
 	__testing.setReviewHostRelayRunnerForTesting(async (request) => {
 		assert.equal(request.targetCwd, canonicalB, "the host relay must materialize and submit against B");
 		relayTargetRoots.push(request.targetCwd!);
+		if (request.routingKey === "review-validator") {
+			assert.ok(validatorReviewer, "the targeted-validator reviewer fixture must be armed before its slot reaches the relay");
+			validatorReviewer.enqueue();
+			return await runReviewHostRelaySlot({
+				...request,
+				gentleAiExecutable: RELAY_DEV_BINARY!,
+				environment,
+				reviewerRegistry: validatorReviewer.registry,
+				selection: validatorReviewer.selection,
+				routingKey: request.routingKey,
+				gentleAiTimeoutMs: 30_000,
+				piTimeoutMs: 30_000,
+			});
+		}
 		reviewer.enqueue();
 		return await runReviewHostRelaySlot({
 			...request,
@@ -807,7 +793,17 @@ test("dev-binary: Pi controller keeps an explicit B root and selected-untracked 
 	const validatorBinding = collectBindingFor(validationStatus.details, "review.capture-validation");
 	const validatorInput = parsedCollectBinding(validatorBinding);
 	assert.equal(validatorInput.captureOperation, "review.capture-validation");
-	assert.equal(validatorInput.submission, undefined, "the Go-owned targeted-validator vector must not accept a caller-authored submission");
+	// gentle-pi#311 P3: gentle-ai's v9 contract renders the targeted-validator
+	// role host-mediated too, carrying a submission descriptor alongside
+	// --materialize=true exactly like a lens capture-result materialize slot.
+	const validatorSubmission = record(validatorInput.submission, "host-mediated targeted-validator submission");
+	assert.equal(validatorSubmission.operationToken, "capture-validation");
+	const validatorSubmissionValues = validatorSubmission.values;
+	assert.ok(Array.isArray(validatorSubmissionValues) && validatorSubmissionValues.length === 1, "the targeted-validator submission must bind exactly one artifact value");
+	const validatorSubmissionValue = record(validatorSubmissionValues[0], "targeted-validator submission value");
+	assert.equal(validatorSubmissionValue.slot, "provider_targeted_validator");
+	assert.equal(validatorSubmissionValue.domain, "artifact_path_or_stdin");
+	assert.equal(validatorSubmissionValue.schema, "https://gentle-ai.dev/schema/review/validator/v1");
 	const validationRequest = record(validatorInput.validationRequest, "targeted-validator validation request");
 	const validatorArgumentTokens = collectBindingArgumentTokens(validatorBinding);
 	const validatorRequestHash = collectBindingArgument(validatorBinding, "request-hash");
@@ -822,20 +818,36 @@ test("dev-binary: Pi controller keeps an explicit B root and selected-untracked 
 	assert.ok(Array.isArray(validationRequest.fixClassifications) && validationRequest.fixClassifications.length > 0, "the public targeted-validator request must retain Go's classifications");
 	assert.ok(validatorArgumentTokens.includes(`--request-hash=${validatorRequestHash}`), "the public targeted-validator vector must retain its request hash");
 	assert.ok(validatorArgumentTokens.includes("--agent=pi"), "the public targeted-validator vector must retain the Pi binding");
-	assert.ok(validatorArgumentTokens.includes("--execute=true"), "the public targeted-validator vector must retain Go-owned execution");
+	assert.ok(validatorArgumentTokens.includes("--materialize=true"), "the public targeted-validator vector must retain the host-mediated materialize binding");
+	assert.equal(validatorArgumentTokens.includes("--execute=true"), false, "the v9 host-mediated form must never carry --execute alongside its submission");
 	assert.ok(publicStatusProjectionPaths(validationStatus.details).includes("selected.txt"), "the targeted-validator STATUS must remain bound to selected.txt");
 	assert.equal(publicStatusProjectionPaths(validationStatus.details).includes("excluded.txt"), false, "the targeted-validator STATUS must remain outside excluded.txt");
 
-	environment.OPAQUE_PI_TARGETED_VALIDATOR_RESULT = JSON.stringify({
+	// Arm the targeted-validator faux reviewer now that its request hash and
+	// target identity are known; the relay override above dispatches to it by
+	// routing key.
+	validatorReviewer = fauxReviewerFor(() => JSON.stringify({
 		targeted_validation_request_hash: validatorRequestHash,
 		correction_target_identity: validatorTargetIdentity,
 		original_criteria: { passed: true, evidence: ["focused acceptance proof passed"] },
 		correction_regression: { passed: true, evidence: ["focused regression proof passed"] },
 		follow_ups: [],
-	});
+	}));
+	const validatorForecast = await capture.execute(
+		"combined-targeted-validator-forecast",
+		{ lineageId: lineage, workspaceRoot: nestedTarget, collectBinding: validatorBinding },
+		undefined,
+		undefined,
+		sessionContext(sessionA),
+	);
+	const validatorForecastDetails = record(validatorForecast.details, "combined targeted-validator forecast");
+	assert.equal(validatorForecastDetails.status, "blocked");
+	assert.equal(validatorForecastDetails.outcome, "reviewer-model-run-forecast");
+	assert.equal(validatorReviewer.calls.length, 0, "forecast acknowledgement must not launch a reviewer completion");
+
 	const providerValidation = await capture.execute(
 		"combined-provider-targeted-validation",
-		{ lineageId: lineage, workspaceRoot: nestedTarget, collectBinding: validatorBinding },
+		{ lineageId: lineage, workspaceRoot: nestedTarget, collectBinding: validatorBinding, reviewerRunAcknowledged: true },
 		undefined,
 		undefined,
 		sessionContext(sessionA),
@@ -848,22 +860,16 @@ test("dev-binary: Pi controller keeps an explicit B root and selected-untracked 
 	assert.equal(validationClosure.schema, "gentle-ai.review-last-event-closure/v1");
 	assert.equal(validationClosure.operation, "review/capture-validation");
 	assert.equal(validationClosure.state, "approved");
-	const validationCaptureCalls = nativeCalls.filter((call) => call.arguments[0] === "review" && call.arguments[1] === "capture-validation");
-	assert.equal(validationCaptureCalls.length, 1, "the Go-owned targeted validator must capture exactly once");
-	assert.equal(validationCaptureCalls[0]!.cwd, canonicalB);
-	assert.deepEqual(validationCaptureCalls[0]!.arguments.slice(2), validatorArgumentTokens, "the Go-owned targeted validator must receive the exact public vector");
 
-	const validatorPiLog = record(JSON.parse(readFileSync(fakePiLog, "utf8")) as unknown, "validator fake Pi log");
-	assert.ok(Array.isArray(validatorPiLog.calls), "validator fake Pi log must record the Go-owned subprocess");
-	const validatorCall = validatorPiLog.calls.map((call) => record(call, "validator fake Pi call")).find((call) => call.role === "targeted-validator");
-	assert.ok(validatorCall, "the fake Pi log must contain the Go-owned targeted-validator subprocess");
-	assert.deepEqual(validatorCall!.entries, [], "the Go-owned validator must run from an empty isolated sandbox");
-	assert.notEqual(validatorCall!.cwd, canonicalB, "the Go-owned validator subprocess must not run in B");
-	assert.notEqual(validatorCall!.cwd, sessionA, "the Go-owned validator subprocess must not run in A");
-	assert.equal(existsSync(stringValue(validatorCall!.cwd, "validator fake Pi scratch cwd")), false, "the Go-owned validator sandbox must be removed after the subprocess exits");
-	const validatorPrompt = stringValue(validatorCall!.prompt, "validator fake Pi prompt");
-	assert.ok(validatorPrompt.length > 0, "the Go-owned validator must receive a provider-rendered prompt");
-	assert.ok(validatorPrompt.includes(validatorRequestHash), "the Go-owned validator prompt must retain the provider request hash");
+	// gentle-pi#311 P3: the targeted validator now completes in-process
+	// through the same host relay seam as the lens reviewer above — there is
+	// no Go-owned pi subprocess, no PATH fixture, and no scratch sandbox to
+	// assert for this leg any more; it never reaches the native adapter's
+	// own `review capture-validation` invocation, since the relay spawns
+	// gentle-ai itself for both materialize and submit.
+	assert.equal(validatorReviewer.calls.length, 1, "the in-process targeted validator must complete exactly once");
+	assert.ok(validatorReviewer.calls[0]!.promptText.includes(validatorRequestHash), "the targeted-validator prompt must retain the provider request hash");
+	assert.equal(nativeCalls.some((call) => call.arguments[0] === "review" && call.arguments[1] === "capture-validation"), false, "the targeted validator must not reach the native adapter directly");
 
 	// Approval no longer burns on its own: it commits one pending
 	// acknowledgement and waits for the host to run that exact invocation

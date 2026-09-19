@@ -29,6 +29,12 @@ There is no model flag, no extension allowlist, and no ambient default model: th
 
 A typed reviewer refusal fails closed. The coordinator reports the refusal — including the completion's evidence — without an agentless lifecycle fallback, local retry policy, synthetic result, or alternate approval path.
 
+## Refuter and targeted validator
+
+The refuter and targeted-validator roles are host-mediated in-process completions too, on a provider that advertises the v9 role contract: the collect input carries `--materialize=true` and a provider-owned submission descriptor, exactly like a lens capture-result materialize slot — materialize, complete in-process, then submit through the exact `--input` form. Their entries in the agent model routing config, `review-refuter` and `review-validator`, select the model and thinking level the same way `review-<lens>` does for a lens; a missing entry is refused typed, naming that key, before materialize ever runs.
+
+An older provider that has not advertised the v9 role contract still renders each role as a self-contained vector (binding tokens plus `--agent=pi --execute=true`, no submission): executing that exact vector makes Go materialize the role prompt, run its own locked-down pi subprocess, and admit the verdict itself. The host still accepts this compatibility form unchanged.
+
 ## Dynamic contract delivery
 
 Package static assets intentionally omit lifecycle instructions, candidate routing, recovery procedures, receipt semantics, and any delivery-gate or delivery-authorization behavior. Since Gentle AI stopped generating Pi APPEND_SYSTEM composition, Gentle Pi mirrors the provider contract bundle's `orchestration/pi.md` review execution contract locally (`contracts/review-provider-contract-mirror/`) and injects that verified, mirrored text into the primary session's system prompt at session start. Gentle AI writes nothing into the Pi system prompt; the host follows only that mirrored contract. When the mirrored contract is absent or unreadable, Gentle Pi does not invent a fallback; delivery remains ordinary repository policy.

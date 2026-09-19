@@ -323,6 +323,39 @@ test("relay happy path moves prompt bytes verbatim into the completion and submi
 	assert.deepEqual(gentleAiCalls.map((call) => call.cwd), [fixture.targetCwd, fixture.targetCwd]);
 });
 
+// gentle-pi#311 P3: a v9 provider role slot (refuter, targeted validator)
+// reaches this same relay through the exact same request shape a lens
+// materialize slot uses — the only difference is the operation name the
+// provider's own submission descriptor names. The materialize invocation
+// must follow that name, never a hardcoded "capture-result".
+test("the materialize invocation follows the provider's own submission operation, not a hardcoded capture-result", async (t) => {
+	const fixture = harness(t);
+	const bindingTokens = [
+		"--lineage=review-1d5aadacc600e167",
+		`--expected-revision=sha256:${"c".repeat(64)}`,
+		`--target=sha256:${"d".repeat(64)}`,
+		`--repository-context=rctx1_${"e".repeat(64)}`,
+	];
+	const refuterCaptureTokens = [...bindingTokens, "--agent=pi", "--materialize=true"];
+	const refuterSubmission: ReviewCaptureSubmissionV1 = {
+		operationToken: "capture-refuter",
+		argumentTokens: [...bindingTokens, "--agent=pi", "--input={{value}}"],
+		values: [{ slot: "provider_refuter", domain: "artifact_path_or_stdin", substitutionLocation: bindingTokens.length + 1 }],
+	};
+	const { runReviewer, calls } = textReviewer(REVIEWER_TEXT);
+	const result = await runRelay(fixture, { captureArgumentTokens: refuterCaptureTokens, submission: refuterSubmission, routingKey: "review-refuter" }, runReviewer);
+
+	assert.equal(JSON.parse(result.submission).admission_decision, "completed");
+	assert.equal(calls.length, 1);
+	const gentleAiCalls = readLog(fixture.logPath);
+	assert.equal(gentleAiCalls.length, 2);
+	assert.deepEqual(gentleAiCalls[0]!.argv, ["review", "capture-refuter", ...refuterCaptureTokens]);
+	assert.deepEqual(gentleAiCalls[1]!.argv.slice(0, 2 + bindingTokens.length), ["review", "capture-refuter", ...bindingTokens]);
+	assert.equal(gentleAiCalls[1]!.argv[2 + bindingTokens.length], "--agent=pi");
+	const submitted = gentleAiCalls[1]!.argv.at(-1)!;
+	assert.match(submitted, /^--input=\S+$/);
+});
+
 test("preparation snapshots mutable submission tokens and values before materialization", async (t) => {
 	const fixture = harness(t);
 	const submissionTokens = [...SUBMISSION.argumentTokens];

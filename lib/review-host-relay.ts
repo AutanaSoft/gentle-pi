@@ -219,6 +219,16 @@ export interface ReviewHostRelaySlot {
 	readonly lens?: string;
 	readonly order?: string;
 	readonly subjectHash?: string;
+	/**
+	 * Overrides the routing config key the reviewer selection resolves
+	 * through (gentle-pi#311 P3). A lens slot leaves this unset and resolves
+	 * through `lens` instead; a v9 host-mediated refuter/targeted-validator
+	 * slot sets it to its fixed `review-refuter` / `review-validator` key,
+	 * since those roles carry no per-slot lens identity.
+	 */
+	readonly routingKey?: string;
+	/** The provider-declared collect input name (e.g. `provider_refuter`), carried for diagnostics only. */
+	readonly name?: string;
 }
 
 function argumentValue(input: ReviewCollectInputV3, name: string): string | undefined {
@@ -276,6 +286,40 @@ export function reviewProviderRoleVectorSlots(inputs: readonly ReviewCollectInpu
 	return inputs.filter((input) => isReviewProviderRoleVectorInput(input)).map((input) => ({
 		captureOperation: input.captureOperation as ReviewProviderRoleVectorSlot["captureOperation"],
 		argumentTokens: input.arguments.map((argument) => renderToken(argument)),
+		name: input.name,
+	}));
+}
+
+// ---------------------------------------------------------------------------
+// Host-mediated provider role slots (gentle-pi#311 P3; provider contract
+// v9) — the same two role capture operations above, but rendered exactly
+// like a lens materialize slot: binding tokens plus `--agent=pi
+// --materialize=true` (never `--execute`) and a provider-owned submission
+// descriptor. These slots run through the SAME relay machinery a lens slot
+// does (`prepareReviewHostRelaySlot` / `submitReviewHostRelayPreparedResult`)
+// — there is no second relay. The only role-specific parts are the fixed
+// `routingKey` (there is no per-slot lens identity to read one from) and the
+// input's own schema, which already names refuter vs targeted-validator in
+// every refusal that carries the request.
+// ---------------------------------------------------------------------------
+
+const REVIEW_HOST_MEDIATED_ROLE_ROUTING_KEY: Record<ReviewProviderRoleVectorSlot["captureOperation"], "review-refuter" | "review-validator"> = {
+	[REVIEW_PROVIDER_ROLE_CAPTURE_OPERATION.CAPTURE_REFUTER]: "review-refuter",
+	[REVIEW_PROVIDER_ROLE_CAPTURE_OPERATION.CAPTURE_VALIDATION]: "review-validator",
+};
+
+export function isReviewHostMediatedRoleCollectInput(input: ReviewCollectInputV3): boolean {
+	return (REVIEW_PROVIDER_ROLE_CAPTURE_OPERATIONS as readonly string[]).includes(input.captureOperation)
+		&& argumentValue(input, "materialize") === "true"
+		&& argumentValue(input, "agent") === "pi"
+		&& input.submission !== undefined;
+}
+
+export function reviewHostMediatedRoleSlots(inputs: readonly ReviewCollectInputV3[]): readonly ReviewHostRelaySlot[] {
+	return inputs.filter((input) => isReviewHostMediatedRoleCollectInput(input)).map((input) => ({
+		captureArgumentTokens: input.arguments.map((argument) => renderToken(argument)),
+		submission: input.submission!,
+		routingKey: REVIEW_HOST_MEDIATED_ROLE_ROUTING_KEY[input.captureOperation as ReviewProviderRoleVectorSlot["captureOperation"]],
 		name: input.name,
 	}));
 }
@@ -618,9 +662,14 @@ export async function prepareReviewHostRelaySlot(
 
 	// The provider materializes the opaque prompt and detects whether this relay
 	// surface is available. No version sniffing or prompt reconstruction occurs.
+	// The materialize subcommand is the provider's own submission operation
+	// token (validated present above): "capture-result" for a lens slot,
+	// "capture-refuter" or "capture-validation" for a v9 host-mediated role
+	// slot — the provider always names the same operation for both the
+	// materialize and the submit leg of one slot.
 	let materialized: ProcessCapture;
 	try {
-		materialized = await collectGentleAiProcess(preparedRequest.gentleAiExecutable!, ["review", "capture-result", ...preparedRequest.captureArgumentTokens], {
+		materialized = await collectGentleAiProcess(preparedRequest.gentleAiExecutable!, ["review", preparedRequest.submission!.operationToken, ...preparedRequest.captureArgumentTokens], {
 			cwd: preparedRequest.targetCwd!,
 			env: { ...preparedRequest.environment!, [GENTLE_PI_REVIEW_RELAY_CONTRACT_ENV]: GENTLE_PI_REVIEW_RELAY_CONTRACT },
 			timeoutMs: preparedRequest.gentleAiTimeoutMs!,
