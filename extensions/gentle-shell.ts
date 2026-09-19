@@ -14,7 +14,15 @@ import { CommandPalette, commandsKey, type CommandPaletteResult } from "../lib/c
 import { buildCommandPaletteGroups } from "../lib/command-palette-catalog.ts";
 import { agentsViewKey } from "../lib/agents-keys.ts";
 import { GentleAiDevBinaryOverrideError, resolveGentleAiDevBinaryOverride } from "../lib/gentle-ai-binary.ts";
-import { framePromptLines, PROMPT_HINT, PROMPT_STATE, SHELL_PULSE_MS, withPromptHint, type PromptState } from "../lib/shell-prompt.ts";
+import { DOUBLE_ESC_CANCEL_HINT, framePromptLines, PROMPT_HINT, PROMPT_STATE, SHELL_PULSE_MS, withPromptHint, type PromptState } from "../lib/shell-prompt.ts";
+import { gentlePiConfigHome } from "../lib/agent-home.ts";
+import {
+	DOUBLE_ESC_CANCEL_WINDOW_MS,
+	resolveDoubleEscCancelPolicy,
+	writeDoubleEscCancelPolicy,
+	type DoubleEscCancelPolicy,
+	type DoubleEscCancelResolution,
+} from "../lib/double-esc-cancel-policy.ts";
 import { accountIdFromToken, CODEX_PROVIDER, CODEX_USAGE_URL, NAN_PROVIDER, NAN_QUOTA_URL, parseCodexUsage, parseNanQuota, parseUsageHeaders, UsageStore, type ProviderUsage } from "../lib/shell-usage.ts";
 import { UsageView } from "../lib/shell-usage-view.ts";
 import { sidebarHeader, sidebarPart } from "../lib/shell-sidebar.ts";
@@ -181,6 +189,9 @@ interface PromptEditorDeps {
 	bold: (text: string) => string;
 	requestRender(): void;
 	pending(): boolean;
+	now(): number;
+	/** Read fresh on every keypress: the command handler updates this in-memory, the editor never re-reads the file. */
+	doubleEscCancelEnabled(): boolean;
 }
 
 const PROMPT_FRAME_ROLE = "border";
@@ -190,15 +201,22 @@ export class GentlePromptEditor extends CustomEditor {
 	private tick = 0;
 	private pulse: NodeJS.Timeout | undefined;
 	private readonly deps: PromptEditorDeps;
+	// CustomEditor keeps its own `keybindings` private, so this class holds
+	// its own reference to run the same app.interrupt match before deciding
+	// whether to swallow the keystroke.
+	private readonly keybindingsManager: KeybindingsManager;
+	private pendingEscapeCancelDeadline: number | undefined;
 
 	constructor(tui: TUI, theme: EditorTheme, keybindings: KeybindingsManager, deps: PromptEditorDeps) {
 		super(tui, theme, keybindings);
 		this.deps = deps;
+		this.keybindingsManager = keybindings;
 	}
 
 	setWorking(working: boolean): void {
 		this.promptState = working ? PROMPT_STATE.WORKING : PROMPT_STATE.IDLE;
 		this.stopPulse();
+		if (!working) this.pendingEscapeCancelDeadline = undefined;
 		if (working) {
 			this.pulse = setInterval(() => {
 				this.tick += 1;
@@ -207,6 +225,39 @@ export class GentlePromptEditor extends CustomEditor {
 			this.pulse.unref();
 		}
 		this.deps.requestRender();
+	}
+
+	/**
+	 * Swallow the first Esc while working (issue #1163), opt-in via
+	 * doubleEscCancelEnabled(). `pi.registerShortcut("escape")` is not viable
+	 * here: Pi reserves app.interrupt and skips colliding extension
+	 * shortcuts, so this has to sit in front of CustomEditor's own
+	 * handleInput instead. The second Esc within the window is never handled
+	 * here: it falls straight through to `super.handleInput`, which runs
+	 * Pi's own onEscape and performs the actual abort. Idle double-Esc
+	 * (tree/fork), bash-mode Esc, and autocomplete cancel are all decided by
+	 * CustomEditor/onEscape and never reach this branch.
+	 */
+	override handleInput(data: string): void {
+		if (
+			this.promptState === PROMPT_STATE.WORKING &&
+			!this.isShowingAutocomplete() &&
+			this.deps.doubleEscCancelEnabled() &&
+			this.keybindingsManager.matches(data, "app.interrupt")
+		) {
+			if (this.isPendingEscapeCancel()) {
+				this.pendingEscapeCancelDeadline = undefined;
+				super.handleInput(data);
+				return;
+			}
+			// Pi's own idle double-Esc (empty editor -> /tree or /fork) uses a
+			// 500ms window; canceling a running turn is a heavier, harder-to-undo
+			// action, so this confirmation deliberately gets double that time.
+			this.pendingEscapeCancelDeadline = this.deps.now() + DOUBLE_ESC_CANCEL_WINDOW_MS;
+			this.deps.requestRender();
+			return;
+		}
+		super.handleInput(data);
 	}
 
 	render(width: number): string[] {
@@ -221,11 +272,16 @@ export class GentlePromptEditor extends CustomEditor {
 			borderColor: (text) => this.deps.fg(PROMPT_FRAME_ROLE, text),
 			fg: this.deps.fg,
 			bold: this.deps.bold,
+			escHint: this.promptState === PROMPT_STATE.WORKING && this.isPendingEscapeCancel() ? DOUBLE_ESC_CANCEL_HINT : undefined,
 		});
 	}
 
 	dispose(): void {
 		this.stopPulse();
+	}
+
+	private isPendingEscapeCancel(): boolean {
+		return this.pendingEscapeCancelDeadline !== undefined && this.deps.now() < this.pendingEscapeCancelDeadline;
 	}
 
 	private stopPulse(): void {
@@ -239,7 +295,11 @@ export class GentlePromptEditor extends CustomEditor {
 const PROMPT_OWNER = Symbol.for("gentle-pi.prompt-owner");
 type PromptFactory = NonNullable<ReturnType<ExtensionContext["ui"]["getEditorComponent"]>> & { [PROMPT_OWNER]?: boolean };
 
-function installPrompt(ctx: ExtensionContext, onCreated: (prompt: GentlePromptEditor) => void): boolean {
+function installPrompt(
+	ctx: ExtensionContext,
+	onCreated: (prompt: GentlePromptEditor) => void,
+	promptDeps: { now: () => number; doubleEscCancelEnabled: () => boolean },
+): boolean {
 	const previous = ctx.ui.getEditorComponent() as PromptFactory | undefined;
 	if (previous && !previous[PROMPT_OWNER]) return false;
 	const factory: PromptFactory = (tui, theme, keybindings) => {
@@ -248,6 +308,8 @@ function installPrompt(ctx: ExtensionContext, onCreated: (prompt: GentlePromptEd
 			bold: (text) => ctx.ui.theme.bold(text),
 			requestRender: () => tui.requestRender(),
 			pending: () => ctx.hasPendingMessages(),
+			now: promptDeps.now,
+			doubleEscCancelEnabled: promptDeps.doubleEscCancelEnabled,
 		});
 		onCreated(prompt);
 		return prompt;
@@ -255,6 +317,45 @@ function installPrompt(ctx: ExtensionContext, onCreated: (prompt: GentlePromptEd
 	factory[PROMPT_OWNER] = true;
 	ctx.ui.setEditorComponent(factory);
 	return true;
+}
+
+const DOUBLE_ESC_CANCEL_COMMAND_NAME = "gentle:double-esc-cancel";
+
+function describeDoubleEscCancelSource(resolution: DoubleEscCancelResolution): string {
+	switch (resolution.source) {
+		case "global_file":
+			return `global file ${resolution.globalFile}`;
+		case "environment":
+			return "GENTLE_PI_DOUBLE_ESC_CANCEL";
+		default:
+			return "built-in default";
+	}
+}
+
+/**
+ * Report the effective policy, the source that decided it, and (when this
+ * invocation just wrote one) the policy it wrote. Unlike background-subagents
+ * there is no project-file layer to outrank the write, so a write always
+ * takes effect immediately.
+ */
+function renderDoubleEscCancelReport(
+	resolution: DoubleEscCancelResolution,
+	wrote?: DoubleEscCancelPolicy,
+): { message: string; type: "info" | "warning" } {
+	const lines = [`double-esc-cancel: ${resolution.policy} (decided by ${describeDoubleEscCancelSource(resolution)})`];
+	if (wrote !== undefined) lines.push(`Wrote ${wrote} to the global file ${resolution.globalFile}.`);
+	if (resolution.malformed) {
+		lines.push(`${resolution.globalFile} is present but malformed, so the policy fails closed to off and the environment variable is not consulted.`);
+	}
+	if (resolution.envValue !== undefined && resolution.source !== "environment") {
+		lines.push(
+			resolution.envValue === "on" || resolution.envValue === "off"
+				? `GENTLE_PI_DOUBLE_ESC_CANCEL=${resolution.envValue} is set, but the global file exists and decides; the env var applies only when no file exists.`
+				: `GENTLE_PI_DOUBLE_ESC_CANCEL="${resolution.envValue}" is not a recognized value ("on" or "off"), so it is ignored.`,
+		);
+	}
+	lines.push("Resolution order (first hit wins): global file, GENTLE_PI_DOUBLE_ESC_CANCEL, built-in default off.");
+	return { message: lines.join("\n"), type: resolution.malformed ? "warning" : "info" };
 }
 
 const CHANGES_WIDGET_KEY = "gentle-shell-changes";
@@ -579,6 +680,17 @@ export default function gentleShell(pi: ExtensionAPI, env: NodeJS.ProcessEnv = p
 		});
 	}
 	let prompt: GentlePromptEditor | undefined;
+	// Resolved once at startup and cached in memory so the editor never
+	// re-reads the file per keypress. The /gentle:double-esc-cancel command
+	// below is the only place that touches the file, and every invocation
+	// re-syncs this cache from disk first, so status, the no-argument toggle
+	// direction, and the Esc gate always describe the same effective policy
+	// even when another session or a hand edit changed the file mid-session.
+	const doubleEscCancelConfigHome = gentlePiConfigHome(env);
+	let doubleEscCancelPolicy: DoubleEscCancelPolicy = resolveDoubleEscCancelPolicy({
+		env,
+		gentlePiConfigHome: doubleEscCancelConfigHome,
+	}).policy;
 	let changes: SessionChanges | undefined;
 	let registry: SessionWorktreeRegistry | undefined;
 	let currentContext: ExtensionContext | undefined;
@@ -660,10 +772,14 @@ export default function gentleShell(pi: ExtensionAPI, env: NodeJS.ProcessEnv = p
 			return { ...part, dispose() { disposeHeader(); uninstall(); part.dispose(); } };
 		});
 		void refreshUsage(ctx, true);
-		const ownsPrompt = installPrompt(ctx, (created) => {
-			prompt?.dispose();
-			prompt = created;
-		});
+		const ownsPrompt = installPrompt(
+			ctx,
+			(created) => {
+				prompt?.dispose();
+				prompt = created;
+			},
+			{ now: () => deps.now(), doubleEscCancelEnabled: () => doubleEscCancelPolicy === "on" },
+		);
 		// Hide native feedback only when our petal replaces it. Native transcript
 		// thinking blocks remain Pi-owned; this changes only the supported loader UI.
 		if (ownsPrompt) ctx.ui.setWorkingVisible(false);
@@ -723,6 +839,41 @@ export default function gentleShell(pi: ExtensionAPI, env: NodeJS.ProcessEnv = p
 			handler: async (ctx) => showCommandPalette(pi, ctx, env),
 		});
 	}
+	// User-owned, like gentle:background-subagents and gentle:review-mode: the
+	// only writer is this handler, reached only by explicit invocation. Unlike
+	// those two, no argument toggles the effective policy instead of merely
+	// reporting it (see odd/tasks/double-esc-cancel.md).
+	pi.registerCommand(DOUBLE_ESC_CANCEL_COMMAND_NAME, {
+		description: "Show or set the double-esc-cancel preference (status|enable|disable); no argument toggles it. User-initiated only.",
+		handler: async (args, ctx) => {
+			const trimmed = args.trim();
+			if (trimmed !== "" && trimmed !== "status" && trimmed !== "enable" && trimmed !== "disable") {
+				ctx.ui.notify(`Unknown /${DOUBLE_ESC_CANCEL_COMMAND_NAME} sub-action "${trimmed}". Use status, enable, or disable.`, "warning");
+				return;
+			}
+			try {
+				const before = resolveDoubleEscCancelPolicy({ env, gentlePiConfigHome: doubleEscCancelConfigHome });
+				doubleEscCancelPolicy = before.policy;
+				const subAction = trimmed === "" ? (before.policy === "on" ? "disable" : "enable") : trimmed;
+				if (subAction === "status") {
+					const report = renderDoubleEscCancelReport(before);
+					ctx.ui.notify(report.message, report.type);
+					return;
+				}
+				const wrote: DoubleEscCancelPolicy = subAction === "enable" ? "on" : "off";
+				writeDoubleEscCancelPolicy(wrote, { gentlePiConfigHome: doubleEscCancelConfigHome });
+				const after = resolveDoubleEscCancelPolicy({ env, gentlePiConfigHome: doubleEscCancelConfigHome });
+				// Cache what the file actually resolves to, not what was written: a
+				// competing writer or a read failure would otherwise leave the gate
+				// and the report disagreeing.
+				doubleEscCancelPolicy = after.policy;
+				const report = renderDoubleEscCancelReport(after, wrote);
+				ctx.ui.notify(report.message, report.type);
+			} catch (error) {
+				ctx.ui.notify(error instanceof Error ? error.message : String(error), "error");
+			}
+		},
+	});
 	pi.on("agent_start", (_event, ctx) => {
 		prompt?.setWorking(true);
 		// The dev-binary card is a startup notice: it leaves with the first prompt.
